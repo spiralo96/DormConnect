@@ -1,0 +1,1518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DormConnect</title>
+
+<!-- ============================================================
+     FIREBASE SDKS (loaded as ES modules straight from Google's CDN)
+     - app: core Firebase init
+     - database: Realtime Database (our chat + presence engine)
+     - auth: Anonymous Authentication (silent, no login screen —
+       gives every visitor a real, unforgeable identity token that
+       our database rules can check against)
+     ============================================================ -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getDatabase, ref, push, set, get, onValue, onChildAdded,
+    onDisconnect, serverTimestamp, remove, query, orderByChild,
+    startAt, child, update
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+  import {
+    getAuth, signInAnonymously, onAuthStateChanged,
+    signInWithEmailAndPassword, createUserWithEmailAndPassword
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+  // ----------------------------------------------------------------
+  // STEP 1: Your Firebase project config (from console.firebase.google.com)
+  // ----------------------------------------------------------------
+  const firebaseConfig = {
+    apiKey: "AIzaSyDUJ6co-jNOuvwzCeVvqKVYQUFI5KiOLbM",
+    authDomain: "dorm-connect-a7a8b.firebaseapp.com",
+    databaseURL: "https://dorm-connect-a7a8b-default-rtdb.firebaseio.com",
+    projectId: "dorm-connect-a7a8b",
+    storageBucket: "dorm-connect-a7a8b.firebasestorage.app",
+    messagingSenderId: "38318206068",
+    appId: "1:38318206068:web:97eb7d8a9846d04a097521"
+  };
+
+  // STEP 2: boot Firebase + grab handles to Database and Auth
+  const app  = initializeApp(firebaseConfig);
+  const db   = getDatabase(app);
+  const auth = getAuth(app);
+
+  // Expose what we need on window so the plain <script> below (non-module)
+  // can call into Firebase. We keep all Firebase-specific calls in this
+  // module block, and the app logic below stays framework-agnostic.
+  window.__fb = {
+    db, ref, push, set, get, onValue, onChildAdded,
+    onDisconnect, serverTimestamp, remove, query, orderByChild,
+    startAt, child, update, auth,
+    signInWithEmailAndPassword, createUserWithEmailAndPassword
+  };
+
+  // STEP 3: decide HOW to sign in.
+  //
+  // If the URL has ?admin=<the secret>, we do NOT auto-sign-in
+  // anonymously. Instead we wait for the plain <script> below to call
+  // window.__fb.adminLogin(email, password) once the admin enters
+  // their credentials in the login form. This prevents the race where
+  // anonymous sign-in would otherwise complete first and the admin
+  // panel would end up using a throwaway anonymous UID instead of the
+  // real, permanent account UID.
+  //
+  // For every normal visitor (no admin param, or wrong secret), we
+  // proceed exactly as before: silent, invisible anonymous sign-in.
+  const urlParams = new URLSearchParams(window.location.search);
+  const isAdminAttempt = urlParams.get('admin') === 'iamowner';
+
+  onAuthStateChanged(auth, (user) => {
+    if (user) {
+      window.__fb.myUid = user.uid;
+      window.__fb.isRealAccount = !user.isAnonymous;
+      window.dispatchEvent(new Event('firebase-ready'));
+    } else if (!isAdminAttempt) {
+      // Only auto-sign-in anonymously for normal visitors. Admin loads
+      // wait for explicit email/password submission instead (see the
+      // login form + adminLogin() in the plain <script> below).
+      signInAnonymously(auth).catch((err) => {
+        console.error('[AUTH] anonymous sign-in failed:', err);
+      });
+    } else {
+      // Admin URL detected, nobody signed in yet — tell the rest of
+      // the page to show the admin login form instead of booting
+      // normally. We still fire 'firebase-ready' with no UID yet, so
+      // boot-time code that doesn't need auth (like attaching click
+      // handlers) can proceed; anything UID-dependent waits for
+      // adminLogin() to complete separately.
+      window.__fb.awaitingAdminLogin = true;
+      window.dispatchEvent(new Event('firebase-ready'));
+    }
+  });
+
+  // Exposed so the plain <script> below can trigger email/password
+  // sign-in once the admin submits the login form.
+  window.__fb.adminLogin = async (email, password) => {
+    const cred = await signInWithEmailAndPassword(auth, email, password);
+    window.__fb.myUid = cred.user.uid;
+    window.__fb.isRealAccount = true;
+    window.__fb.awaitingAdminLogin = false;
+    return cred.user.uid;
+  };
+</script>
+
+<style>
+  /* ============================================================
+     STYLES — UNCHANGED FROM THE ORIGINAL SUPABASE VERSION
+     (mauve-black terminal theme, grey buttons, purple leave button)
+     ============================================================ */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1a1625; color: #c9b8d4;
+    font-family: 'Courier New', monospace;
+    min-height: 100vh; display: flex; flex-direction: column;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px; height: 52px; background: #12101c;
+    border-bottom: 1px solid #2e2540; flex-shrink: 0;
+  }
+  .logo { color: #9b72cf; font-size: 18px; font-weight: bold; letter-spacing: 1px; }
+  .logo span { color: #c9b8d4; }
+  .hello-text { color: #9b72cf; font-size: 14px; }
+  .hello-text span { color: #c9b8d4; }
+  .topbar-right { display: flex; gap: 10px; align-items: center; }
+  .btn-name {
+    background: #2a2138; border: 1px solid #3e3058; color: #c9b8d4;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 13px;
+    display: flex; align-items: center; gap: 6px; transition: background 0.15s;
+  }
+  .btn-name:hover { background: #352a4a; }
+  .btn-leave {
+    background: #6b3fa0; border: none; color: #f0e6ff;
+    padding: 6px 16px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 13px;
+    transition: background 0.15s; display: none;
+  }
+  .btn-leave:hover { background: #7d4db8; }
+  .main {
+    flex: 1; display: flex; flex-direction: column;
+    padding: 20px 24px; overflow: hidden; min-height: 0;
+  }
+  .dorm-line {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 14px; flex-shrink: 0; flex-wrap: wrap;
+  }
+  .dorm-input {
+    background: #2a2138; border: 1px solid #3e3058; color: #e0d0f0;
+    padding: 5px 12px; border-radius: 8px;
+    font-family: 'Courier New', monospace; font-size: 14px;
+    width: 180px; outline: none; transition: border-color 0.15s;
+  }
+  .dorm-input:focus { border-color: #9b72cf; }
+  .dorm-input::placeholder { color: #4a3a60; }
+  .dorm-input:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-enter {
+    background: #2a2138; border: 1px solid #3e3058; color: #c9b8d4;
+    padding: 5px 16px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 14px;
+    transition: background 0.15s; min-width: 64px;
+  }
+  .btn-enter:hover { background: #352a4a; }
+  .btn-enter:disabled { opacity: 0.4; cursor: not-allowed; }
+  .status-line {
+    margin-top: 10px; font-size: 14px; color: #6a5a80;
+    min-height: 22px; display: none; align-items: center; gap: 6px;
+  }
+  .status-connected { color: #4ecf8a; }
+  .status-notexist { color: #cf4e7e; }
+  .make-own-area { display: none; margin-top: 8px; }
+  .make-own-text { font-size: 13px; color: #cf6ead; }
+  .btn-makeown {
+    margin-top: 8px; background: #6b3fa0; border: none; color: #f0e6ff;
+    padding: 8px 18px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 13px;
+    display: block; transition: background 0.15s;
+  }
+  .btn-makeown:hover { background: #7d4db8; }
+
+  /* WHAT'S NEW BLOCK — landing screen only */
+  .whats-new {
+    margin-top: 28px; padding-top: 16px;
+    border-top: 1px solid #2e2540; max-width: 520px;
+  }
+  .whats-new-title { color: #9b72cf; font-size: 13px; margin-bottom: 8px; }
+  .whats-new-body {
+    color: #8a7a9a; font-size: 13px; line-height: 1.8; white-space: pre-wrap;
+  }
+  .whats-new-body:empty::before {
+    content: 'Nothing new right now.'; color: #4a3a60; font-style: italic;
+  }
+  .chat-area {
+    flex: 1; overflow-y: auto; margin-top: 14px; padding-right: 4px;
+    display: none; flex-direction: column; gap: 2px; min-height: 0;
+  }
+  .chat-area::-webkit-scrollbar { width: 4px; }
+  .chat-area::-webkit-scrollbar-thumb { background: #3e3058; border-radius: 4px; }
+  .msg-line { font-size: 14px; line-height: 1.7; word-break: break-word; }
+  .msg-name { color: #9b72cf; font-weight: bold; }
+  .msg-name.mine { color: #cf9b72; }
+  .msg-text { color: #d0c4e0; }
+  .msg-system { color: #4a3860; font-style: italic; font-size: 13px; }
+  .msg-system.join { color: #4ecf8a; }
+  .msg-system.leave { color: #cf6e6e; }
+  .input-bar {
+    flex-shrink: 0; margin-top: 12px;
+    border-top: 1px solid #2e2540; padding-top: 12px; display: none;
+  }
+  .input-row { display: flex; align-items: center; gap: 8px; }
+  .input-prompt { color: #9b72cf; font-size: 14px; white-space: nowrap; }
+  .msg-input {
+    flex: 1; background: transparent; border: none; color: #e0d0f0;
+    font-family: 'Courier New', monospace; font-size: 14px;
+    outline: none; caret-color: #9b72cf;
+  }
+  .msg-input::placeholder { color: #3a2a50; }
+  .user-count { color: #3e3058; font-size: 12px; margin-top: 6px; }
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(10,8,18,0.75);
+    display: none; align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: #1e1830; border: 1px solid #3e3058;
+    border-radius: 10px; padding: 28px 28px 24px;
+    width: 340px; max-width: 90vw; position: relative;
+  }
+  .modal-title { color: #e0d0f0; font-size: 17px; margin-bottom: 6px; }
+  .modal-sub { color: #6a5a80; font-size: 13px; margin-bottom: 18px; }
+  .modal-close {
+    position: absolute; top: 14px; right: 16px;
+    background: none; border: none; color: #4a3a60;
+    font-size: 18px; cursor: pointer;
+  }
+  .modal-close:hover { color: #9b72cf; }
+  .modal-input {
+    width: 100%; background: #2a2138; border: 1px solid #3e3058; color: #e0d0f0;
+    padding: 8px 14px; border-radius: 8px; font-family: 'Courier New', monospace;
+    font-size: 14px; outline: none; margin-bottom: 14px; transition: border-color 0.15s;
+  }
+  .modal-input:focus { border-color: #9b72cf; }
+  .btn-save {
+    width: 100%; background: #6b3fa0; border: none; color: #f0e6ff;
+    padding: 10px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 14px; font-weight: bold;
+  }
+  .btn-save:hover { background: #7d4db8; }
+  .btn-randomize {
+    width: 100%; background: #2a2138; border: 1px solid #3e3058; color: #c9b8d4;
+    padding: 9px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 13px;
+    margin-top: 10px;
+  }
+  .btn-randomize:hover { background: #352a4a; }
+
+  .admin-login-error {
+    color: #cf4e7e; font-size: 12px; margin-top: 10px;
+    background: #2a1822; border: 1px solid #4a2535; border-radius: 6px;
+    padding: 8px 12px;
+  }
+  .admin-login-hint {
+    color: #4a3a60; font-size: 11px; margin-top: 16px; line-height: 1.6;
+    border-top: 1px solid #2e2540; padding-top: 12px;
+  }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: #2a2138; border: 1px solid #cf4e7e; color: #cf6ead;
+    padding: 10px 20px; border-radius: 8px; font-size: 13px;
+    z-index: 200; display: none; white-space: nowrap;
+  }
+  .spinner {
+    display: inline-block; width: 10px; height: 10px;
+    border: 2px solid #3e3058; border-top-color: #9b72cf;
+    border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 4px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ============================================================
+     ADMIN PANEL — only reachable via ?admin=SECRET in the URL.
+     Fully separate overlay; normal users never see any trace of it.
+     ============================================================ */
+  .admin-overlay {
+    position: fixed; inset: 0; background: #14101d; z-index: 500;
+    display: none; flex-direction: column; overflow: hidden;
+  }
+  .admin-overlay.open { display: flex; }
+  .admin-topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px; height: 52px; background: #0e0c16;
+    border-bottom: 1px solid #3e3058; flex-shrink: 0;
+  }
+  .admin-title { color: #cf9b72; font-size: 16px; font-weight: bold; }
+  .admin-title span { color: #6a5a80; font-size: 12px; margin-left: 8px; }
+  .admin-close {
+    background: #2a2138; border: 1px solid #3e3058; color: #c9b8d4;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 13px;
+  }
+  .admin-close:hover { background: #352a4a; }
+  .admin-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
+  .admin-empty { color: #4a3a60; font-size: 14px; font-style: italic; }
+  .admin-room-card {
+    background: #1e1830; border: 1px solid #3e3058; border-radius: 8px;
+    padding: 14px 18px; margin-bottom: 12px;
+  }
+  .admin-room-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .admin-room-code { color: #9b72cf; font-size: 15px; font-weight: bold; }
+  .admin-room-meta { color: #6a5a80; font-size: 12px; }
+  .admin-room-users { color: #4ecf8a; font-size: 13px; margin-bottom: 4px; }
+  .admin-room-msgcount { color: #cf9b72; font-size: 13px; }
+  .admin-room-grace { color: #cf6e6e; font-size: 12px; margin-top: 6px; font-style: italic; }
+  .admin-btn-delete {
+    background: #6b3fa0; border: none; color: #f0e6ff;
+    padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 12px;
+  }
+  .admin-btn-delete:hover { background: #cf4e7e; }
+  .admin-btn-watch {
+    background: #2a2138; border: 1px solid #3e3058; color: #4ecf8a;
+    padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 12px;
+  }
+  .admin-btn-watch:hover { background: #352a4a; }
+  .admin-stats {
+    display: flex; gap: 24px; margin-bottom: 20px;
+    color: #6a5a80; font-size: 13px;
+  }
+  .admin-stats b { color: #c9b8d4; font-size: 18px; display: block; }
+
+  .admin-uid-box {
+    background: #1e1830; border: 1px solid #3e3058; border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 20px; font-size: 12px; color: #6a5a80;
+  }
+  .admin-uid-box code {
+    color: #4ecf8a; background: #12101c; padding: 2px 8px;
+    border-radius: 4px; font-size: 12px; user-select: all;
+  }
+  .admin-uid-hint { color: #4a3a60; font-size: 11px; display: block; margin-top: 4px; }
+
+  .admin-section-title { color: #cf9b72; font-size: 13px; margin-bottom: 10px; }
+  .admin-whatsnew-input {
+    width: 100%; max-width: 520px; min-height: 90px;
+    background: #1e1830; border: 1px solid #3e3058; color: #e0d0f0;
+    padding: 10px 14px; border-radius: 8px;
+    font-family: 'Courier New', monospace; font-size: 13px;
+    outline: none; resize: vertical; margin-bottom: 10px; display: block;
+  }
+  .admin-whatsnew-input:focus { border-color: #9b72cf; }
+  .admin-btn-savewn {
+    background: #6b3fa0; border: none; color: #f0e6ff;
+    padding: 7px 18px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 13px;
+  }
+  .admin-btn-savewn:hover { background: #7d4db8; }
+  .admin-whatsnew-saved {
+    display: inline-block; color: #4ecf8a; font-size: 12px; margin-left: 12px;
+  }
+  .admin-btn-wipeall {
+    background: #2a2138; border: 1px solid #cf4e7e; color: #cf6ead;
+    padding: 7px 16px; border-radius: 6px; cursor: pointer;
+    font-family: 'Courier New', monospace; font-size: 12px;
+    margin-bottom: 14px; display: inline-block;
+  }
+  .admin-btn-wipeall:hover { background: #cf4e7e; color: #fff; }
+</style>
+</head>
+<body>
+
+<!-- ================= TOP BAR ================= -->
+<div class="topbar">
+  <div class="logo">&gt;_ <span>DormConnect</span></div>
+  <div class="hello-text">Hello! <span id="hello-name"></span></div>
+  <div class="topbar-right">
+    <button class="btn-name" onclick="openNameModal()">
+      <span style="color:#9b72cf;font-size:12px">✎</span>
+      <span id="topbar-name"></span>
+    </button>
+    <button class="btn-leave" id="btn-leave" onclick="leaveRoom()">&#x2192; Leave</button>
+  </div>
+</div>
+
+<!-- ================= MAIN TERMINAL AREA ================= -->
+<div class="main">
+  <div class="dorm-line">
+    <span style="color:#9b72cf">&gt;_</span>
+    <span style="color:#6a5a80">Enter Dorm code:</span>
+    <input class="dorm-input" id="dorm-input" placeholder="e.g., room123" maxlength="24"
+      onkeydown="if(event.key==='Enter')enterDorm()">
+    <button class="btn-enter" id="btn-enter" onclick="enterDorm()">Enter</button>
+  </div>
+  <div class="status-line" id="status-line"></div>
+  <div class="make-own-area" id="make-own-area">
+    <div class="make-own-text">Enter valid dorm code</div>
+    <button class="btn-makeown" id="btn-makeown" onclick="makeOwn()">Make it your own</button>
+  </div>
+
+  <!-- WHAT'S NEW — shown only on the landing screen, content pulled
+       live from Firebase so it can be edited from the admin panel
+       without redeploying the site. -->
+  <div class="whats-new" id="whats-new" style="display:none">
+    <div class="whats-new-title">// What's new</div>
+    <div class="whats-new-body" id="whats-new-body"></div>
+  </div>
+
+  <div class="chat-area" id="chat-area"></div>
+  <div class="input-bar" id="input-bar">
+    <div class="input-row">
+      <span class="input-prompt">&gt;_</span>
+      <input class="msg-input" id="msg-input" placeholder="Type your message..."
+        maxlength="500" onkeydown="if(event.key==='Enter')sendMsg()">
+    </div>
+    <div class="user-count" id="user-count"></div>
+  </div>
+</div>
+
+<!-- ================= NAME-CHANGE MODAL ================= -->
+<div class="modal-overlay" id="name-modal">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeNameModal()">✕</button>
+    <div class="modal-title">Change Your Name</div>
+    <div class="modal-sub">Enter a new anonymous name for your session</div>
+    <input class="modal-input" id="modal-name-input" placeholder="Enter new name"
+      maxlength="20" onkeydown="if(event.key==='Enter')saveName()">
+    <button class="btn-save" onclick="saveName()">Save</button>
+  </div>
+</div>
+
+<!-- FORCED RENAME MODAL — shown when joining a room finds a name
+     collision. No close (X) button on purpose: the user must resolve
+     this to proceed, either by typing a new name or hitting Randomize. -->
+<div class="modal-overlay" id="rename-modal">
+  <div class="modal-box">
+    <div class="modal-title">Name Already Taken</div>
+    <div class="modal-sub" id="rename-modal-text">This name is already in use in this dorm.</div>
+    <input class="modal-input" id="rename-modal-input" placeholder="Enter a different name"
+      maxlength="20" onkeydown="if(event.key==='Enter')confirmForcedRename()">
+    <button class="btn-save" onclick="confirmForcedRename()">Confirm</button>
+    <button class="btn-randomize" onclick="randomizeForcedRename()">🎲 Randomize Instead</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- ================= ADMIN LOGIN (real email/password, permanent UID) ================= -->
+<div class="modal-overlay" id="admin-login-overlay">
+  <div class="modal-box">
+    <div class="modal-title">Admin Sign-In</div>
+    <div class="modal-sub">
+      Sign in with your admin account. This keeps your identity permanent
+      across visits, so the database rules only need to be set up once.
+    </div>
+    <input class="modal-input" id="admin-login-email" type="email" placeholder="Email"
+      autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('admin-login-password').focus()">
+    <input class="modal-input" id="admin-login-password" type="password" placeholder="Password"
+      autocomplete="current-password" onkeydown="if(event.key==='Enter')submitAdminLogin()">
+    <button class="btn-save" id="admin-login-btn" onclick="submitAdminLogin()">Sign In</button>
+    <div class="admin-login-error" id="admin-login-error" style="display:none"></div>
+    <div class="admin-login-hint">
+      First time? Create this account once in Firebase Console →
+      Authentication → Users → Add user, using the email + password
+      you want to sign in with here.
+    </div>
+  </div>
+</div>
+
+<!-- ================= ADMIN PANEL (hidden unless ?admin=SECRET) ================= -->
+<div class="admin-overlay" id="admin-overlay">
+  <div class="admin-topbar">
+    <div class="admin-title">&gt;_ DormConnect <span>// admin view</span></div>
+    <button class="admin-close" onclick="closeAdmin()">Close</button>
+  </div>
+  <div class="admin-body">
+    <div class="admin-stats" id="admin-stats"></div>
+
+    <div class="admin-uid-box">
+      Your admin UID: <code id="admin-uid-display">loading...</code>
+      <span class="admin-uid-hint">(permanent — only needs to be pasted into database.rules.json once)</span>
+    </div>
+
+    <!-- WHAT'S NEW EDITOR -->
+    <div class="admin-section-title">// What's New (shown on landing screen)</div>
+    <textarea class="admin-whatsnew-input" id="admin-whatsnew-input"
+      placeholder="e.g. Group voice rooms coming soon..."></textarea>
+    <button class="admin-btn-savewn" onclick="adminSaveWhatsNew()">Save</button>
+    <div class="admin-whatsnew-saved" id="admin-whatsnew-saved" style="display:none">Saved ✓</div>
+
+    <div class="admin-section-title" style="margin-top:24px">// Active dorms</div>
+    <button class="admin-btn-wipeall" id="admin-btn-wipeall" onclick="adminWipeAllRooms()">Wipe All Rooms</button>
+    <div id="admin-rooms-list"></div>
+  </div>
+</div>
+
+<script>
+/* =====================================================================
+   DORMCONNECT — FIREBASE REALTIME DATABASE EDITION
+   Every line is commented. Read top to bottom; functions are grouped
+   in the order they run during a normal user session.
+   ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   SECTION 0: GLOBAL STATE
+   These variables track "where we are" in the app at any given moment.
+   --------------------------------------------------------------------- */
+let fb = null;                 // will hold the Firebase helpers once ready (see boot below)
+let myUid = null;                // this browser tab's anonymous Firebase auth UID — our real identity
+let myName = '';                // this browser tab's anonymous DISPLAY name (cosmetic only, not identity)
+let currentRoom = null;         // dorm code we're currently inside, or null if not in a room
+let pendingCode = null;         // dorm code typed into the input but not yet confirmed to exist
+let isMaking = false;           // guard flag: prevents double-clicking "Make it your own"
+let msgListenerUnsub = null;    // function to call to stop listening to new messages
+let presenceListenerUnsub = null; // function to call to stop listening to the user list
+let myPresenceRef = null;       // Firebase ref pointing at "this browser tab's" presence entry
+let isQuietWatch = false;       // true when admin used "Join Quietly" — skips presence + announcements
+let lastSendAt = 0;             // client-side mirror of the rate-limit check (server rules are the real gate)
+
+/* Word lists used to build a random anonymous name like "MauveOwl" */
+const ADJS  = ['Mauve','Crimson','Azure','Amber','Violet','Teal','Coral','Slate','Jade','Indigo','Silver','Golden','Rusty','Mossy','Dusty'];
+const NOUNS = ['Fox','Owl','Bear','Wolf','Hawk','Deer','Lynx','Crow','Mole','Vole','Panda','Otter','Raven','Drake','Fawn'];
+
+/* ---------------------------------------------------------------------
+   SECTION 1: BOOT SEQUENCE
+   The <script type="module"> at the top of <head> initializes Firebase,
+   signs the visitor in anonymously, and fires a 'firebase-ready' event
+   on `window` once a UID is confirmed. We wait for that event before
+   touching any Firebase function, because ES module scripts execute in
+   parallel with normal scripts.
+   --------------------------------------------------------------------- */
+window.addEventListener('firebase-ready', () => {
+  fb = window.__fb;              // grab the {db, ref, push, ...} bundle exposed by the module
+  myUid = fb.myUid;               // our real, server-verified identity — used in every write from now on
+  myName = randomName();         // assign this session a random DISPLAY name (cosmetic, can change pre-session)
+  updateNameUI();                 // paint that name into the top bar
+  console.log('[BOOT] Firebase ready. UID =', myUid, '| Display name =', myName);
+  loadWhatsNew();                 // pull the latest "What's New" text and show it on the landing screen
+  startGraceSweeper();            // begin periodic check for rooms past their 10-min empty grace period
+});
+
+/* ---------------------------------------------------------------------
+   WHAT'S NEW — read-only for normal visitors, editable from the admin
+   panel. Stored at a single fixed path (/siteConfig/whatsNew) so every
+   visitor's landing screen reflects the latest edit live, no redeploy
+   needed. We use onValue (not get) so if you edit it while someone is
+   already sitting on the landing screen, their text updates instantly.
+   --------------------------------------------------------------------- */
+function loadWhatsNew() {
+  const whatsNewRef = fb.ref(fb.db, 'siteConfig/whatsNew');
+  fb.onValue(whatsNewRef, (snapshot) => {
+    const text = snapshot.val() || '';
+    const body = document.getElementById('whats-new-body');
+    body.textContent = text; // textContent, not innerHTML — no HTML injection risk even from admin-entered text
+    const block = document.getElementById('whats-new');
+    // Only show the block on the landing screen (not while inside a room)
+    block.style.display = (!currentRoom && text.trim()) ? 'block' : 'none';
+    console.log('[WHATSNEW] loaded, length =', text.length);
+  });
+}
+
+/* Build a random "AdjectiveNoun" combo, e.g. "VioletFox" */
+function randomName() {
+  const a = ADJS[Math.floor(Math.random() * ADJS.length)];
+  const n = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+  return a + n;
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 2: NAME UI (top bar "Hello! X" + the editable name button)
+   --------------------------------------------------------------------- */
+function updateNameUI() {
+  document.getElementById('hello-name').textContent  = myName;
+  document.getElementById('topbar-name').textContent = myName;
+}
+
+function openNameModal() {
+  // Hard guard: name changes are only allowed BEFORE joining a room or
+  // AFTER leaving one — never while currentRoom is set. This keeps a
+  // person's identity stable for the whole conversation so messages
+  // don't become confusing mid-chat.
+  if (currentRoom) {
+    console.log('[NAME] blocked — cannot change name while inside a room');
+    showToast("Can't change name during an active session");
+    return;
+  }
+  document.getElementById('modal-name-input').value = myName;     // pre-fill with current name
+  document.getElementById('name-modal').classList.add('open');    // show the modal overlay
+  setTimeout(() => document.getElementById('modal-name-input').focus(), 50);
+}
+
+function closeNameModal() {
+  document.getElementById('name-modal').classList.remove('open');
+}
+
+/* ---------------------------------------------------------------------
+   NAME VALIDATION — shared by saveName() and the duplicate-name check
+   inside joinRoom(). Two independent rules, checked in order:
+
+   1. Alphanumeric only. We strip the name down to [a-zA-Z0-9] and
+      compare against the original — if anything was stripped, the
+      name contained a disallowed character (spaces, emoji, punctuation,
+      unicode tricks, etc) and we reject it outright rather than silently
+      mutating what the user typed, since silent mutation could produce
+      a different name than they expected and confuse them.
+
+   2. The word "founder" is banned. The rule as you described it is
+      "founder" with ANY number of trailing/leading spaces, in any
+      case. Since step 1 already strips spaces before this check runs,
+      "founder " and "founder      " collapse to the same string as
+      "founder" by the time we get here — so we just need a single
+      case-insensitive equality check after stripping. This naturally
+      covers every spacing variant without needing a regex with an
+      unbounded quantifier.
+   --------------------------------------------------------------------- */
+function validateName(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, reason: 'Name cannot be empty.' };
+
+  // Rule 1: alphanumeric only (after trimming surrounding whitespace,
+  // since trim() is just removing accidental leading/trailing spaces a
+  // person's keyboard might add — not the same as allowing spaces
+  // *inside* the name, which the alphanumeric strip below still blocks).
+  const stripped = trimmed.replace(/[^a-zA-Z0-9]/g, '');
+  if (stripped !== trimmed) {
+    return { ok: false, reason: 'Name can only contain letters and numbers — no spaces or symbols.' };
+  }
+  if (stripped.length === 0) {
+    return { ok: false, reason: 'Name cannot be empty.' };
+  }
+
+  // Rule 2: "founder" banned, case-insensitive, any spacing variant.
+  // Spacing variants are already collapsed away by Rule 1's strip step
+  // (a name containing any space would've already been rejected above),
+  // so by the time we reach this check we only need to compare the
+  // clean alphanumeric result against "founder" case-insensitively.
+  if (stripped.toLowerCase() === 'founder') {
+    return { ok: false, reason: 'That name is reserved and cannot be used.' };
+  }
+
+  return { ok: true, clean: stripped.slice(0, 20) };
+}
+
+function saveName() {
+  // Second guard here too, in case this is ever called directly
+  // (e.g. via Enter key) while a room is somehow still active.
+  if (currentRoom) {
+    closeNameModal();
+    return;
+  }
+  const raw = document.getElementById('modal-name-input').value;
+  const result = validateName(raw);
+  if (!result.ok) {
+    showToast(result.reason);
+    return;
+  }
+  const oldName = myName;
+  myName = result.clean;
+  updateNameUI();
+  closeNameModal();
+  console.log(`[NAME] Renamed "${oldName}" -> "${myName}" (outside any room)`);
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 3: TOAST (small red error banner at bottom of screen)
+   --------------------------------------------------------------------- */
+let toastTimer = null;
+function showToast(msg, color = '#cf4e7e') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = color;
+  t.style.color = color;
+  t.style.display = 'block';
+  if (toastTimer) clearTimeout(toastTimer);   // reset auto-hide timer if a new toast comes in
+  toastTimer = setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 4: SMALL UI HELPERS
+   --------------------------------------------------------------------- */
+function setLoading(on) {
+  document.getElementById('btn-enter').disabled  = on;
+  document.getElementById('dorm-input').disabled = on;
+  document.getElementById('btn-enter').innerHTML = on ? '<span class="spinner"></span>' : 'Enter';
+}
+
+function setStatus(html) {
+  const el = document.getElementById('status-line');
+  el.style.display = 'flex';
+  el.innerHTML = html;
+}
+
+/* Escape HTML so a typed message like "<script>" can't break the page
+   (basic XSS protection since we insert text via innerHTML). */
+function esc(t) {
+  return String(t)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 5: ENTER DORM CODE  →  check if the room exists
+   Firebase data shape we rely on:
+     /rooms/<code>            = { createdAt: <timestamp> }   (marker that room exists)
+     /rooms/<code>/presence/* = { name: "...", joinedAt: ... } (who's inside, live)
+     /rooms/<code>/messages/* = { name, text, type, ts }       (chat history)
+   --------------------------------------------------------------------- */
+async function enterDorm() {
+  const raw = document.getElementById('dorm-input').value.trim().toLowerCase().replace(/\s+/g, '-');
+  if (!raw) return;                      // ignore empty submissions
+  if (!fb || !myUid) { showToast('Still connecting to server, try again in a sec.'); return; }
+
+  pendingCode = raw;
+  setLoading(true);
+  document.getElementById('make-own-area').style.display = 'none';
+
+  // Look up /rooms/<code> — if it has no data, the room doesn't exist.
+  const roomRef = fb.ref(fb.db, `rooms/${raw}`);
+  const snapshot = await fb.get(roomRef);
+  setLoading(false);
+
+  console.log(`[ENTER] Checked room "${raw}" → exists =`, snapshot.exists());
+
+  if (!snapshot.exists()) {
+    // Room not found — show red "Doesn't exist" + offer to create it
+    setStatus(`<span style="color:#9b72cf">------&gt;</span> <span style="color:#6a5a80">Status:</span> <span class="status-notexist">Doesn't exist</span>`);
+    document.getElementById('make-own-area').style.display = 'block';
+  } else {
+    // Room found — join it directly
+    await joinRoom(raw);
+  }
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 6: MAKE IT YOUR OWN  →  create the room, race-condition safe
+   Firebase has no "INSERT IF NOT EXISTS" the way SQL does, so we use a
+   transaction-like check: re-read right before writing. If two people
+   click at the *exact* same millisecond there's a tiny window where
+   both could create it — but `set()` on the same path just overwrites
+   harmlessly with near-identical data, so no duplicate-room bug can
+   occur the way it did with Postgres unique-key errors.
+   --------------------------------------------------------------------- */
+async function makeOwn() {
+  if (!pendingCode || isMaking) return;   // ignore if already in progress or no code chosen
+  isMaking = true;
+
+  const btn = document.getElementById('btn-makeown');
+  btn.disabled = true;
+  btn.textContent = 'Creating...';
+
+  const roomRef = fb.ref(fb.db, `rooms/${pendingCode}`);
+
+  // Re-check existence right before writing (closes most of the race window)
+  const snap = await fb.get(roomRef);
+  if (snap.exists()) {
+    console.log(`[MAKEOWN] Room "${pendingCode}" was just created by someone else — joining instead of recreating`);
+  } else {
+    // Write the room marker, stamped with our UID as creator. The
+    // rules use this so only a room's creator UID (or whoever's
+    // currently inside) can be validated as a legitimate writer —
+    // see database.rules.json for the exact check.
+    await fb.set(roomRef, { createdAt: Date.now(), createdBy: myUid });
+    console.log(`[MAKEOWN] Created new room "${pendingCode}" by uid ${myUid}`);
+  }
+
+  isMaking = false;
+  btn.disabled = false;
+  btn.textContent = 'Make it your own';
+
+  document.getElementById('make-own-area').style.display = 'none';
+  await joinRoom(pendingCode);
+}
+
+/* ---------------------------------------------------------------------
+   DUPLICATE NAME HANDLING
+   Checked at the start of joinRoom() before any presence is written.
+   If a collision is found, we show a forced rename modal (cannot be
+   dismissed without picking a usable name) instead of letting two
+   people share an identical display name in the same room, which
+   would make message attribution genuinely ambiguous to read.
+   --------------------------------------------------------------------- */
+
+/* Reads the target room's current presence list and checks whether any
+   already-present user has the exact same display name (case-sensitive
+   match, since e.g. "MauveOwl" and "mauveowl" are visually distinct
+   enough to not cause confusion in this app's font/casing). */
+async function checkNameCollision(code, candidateName) {
+  const presenceRef = fb.ref(fb.db, `rooms/${code}/presence`);
+  const snap = await fb.get(presenceRef);
+  if (!snap.exists()) return false;
+  const presence = snap.val();
+  return Object.values(presence).some(p => p.name === candidateName);
+}
+
+/* Shows the rename modal in "forced" mode — used when a name collision
+   is detected on join. Unlike the normal name-change modal, this one
+   cannot be dismissed with the X button (the user MUST pick a usable
+   name to proceed), and it offers a one-click "Randomize" option as a
+   fast escape hatch instead of typing. */
+let forcedRenameTargetCode = null;
+function promptForcedRename(code) {
+  forcedRenameTargetCode = code;
+  document.getElementById('rename-modal-text').textContent =
+    `"${myName}" is already taken in this dorm. Choose a different name to continue.`;
+  document.getElementById('rename-modal-input').value = '';
+  document.getElementById('rename-modal').classList.add('open');
+  setTimeout(() => document.getElementById('rename-modal-input').focus(), 50);
+}
+
+function closeRenameModal() {
+  document.getElementById('rename-modal').classList.remove('open');
+  forcedRenameTargetCode = null;
+}
+
+/* User typed a new name manually and clicked Confirm */
+async function confirmForcedRename() {
+  const raw = document.getElementById('rename-modal-input').value;
+  const result = validateName(raw);
+  if (!result.ok) {
+    showToast(result.reason);
+    return;
+  }
+  const code = forcedRenameTargetCode;
+  myName = result.clean;
+  updateNameUI();
+  closeRenameModal();
+  console.log(`[JOIN] Forced rename to "${myName}" — retrying join`);
+  await joinRoom(code); // retry the join with the new name
+}
+
+/* User clicked "Randomize" instead of typing one themselves — keeps
+   regenerating until it lands on something not already in the room,
+   so they're never stuck re-rolling into another collision. */
+async function randomizeForcedRename() {
+  const code = forcedRenameTargetCode;
+  let candidate = randomName();
+  let attempts = 0;
+  // Safety cap at 20 attempts — astronomically unlikely to ever need
+  // more than 2-3 given the word-list size, but avoids any chance of
+  // an infinite loop in a pathological edge case.
+  while (await checkNameCollision(code, candidate) && attempts < 20) {
+    candidate = randomName();
+    attempts++;
+  }
+  myName = candidate;
+  updateNameUI();
+  closeRenameModal();
+  console.log(`[JOIN] Randomized rename to "${myName}" — retrying join`);
+  await joinRoom(code);
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 7: JOIN ROOM
+   Steps, in order:
+     1. Register our presence under /rooms/<code>/presence/<myPushId>
+     2. Set an onDisconnect() hook so Firebase auto-removes us if the
+        tab closes, the wifi dies, laptop sleeps, etc — no manual
+        "are you still there" polling needed.
+     3. Start listening for new chat messages (onChildAdded).
+     4. Start listening for presence changes (onValue) to update the
+        user count live and detect when the room becomes empty.
+     5. Post a "X has joined" system message.
+   --------------------------------------------------------------------- */
+async function joinRoom(code, silent = false) {
+  // --- DUPLICATE NAME CHECK (skipped for silent/admin-watch joins,
+  // since the admin never writes a presence entry and is invisible to
+  // begin with — there's nothing to collide with). ---
+  if (!silent) {
+    const collision = await checkNameCollision(code, myName);
+    if (collision) {
+      console.log(`[JOIN] Name "${myName}" already taken in room "${code}" — prompting rename`);
+      promptForcedRename(code);
+      return; // joinRoom will be re-called by the rename flow once resolved
+    }
+  }
+
+  currentRoom = code;
+  document.getElementById('whats-new').style.display = 'none'; // hide landing-only content
+
+  if (silent) {
+    // ADMIN "JOIN QUIETLY" MODE: we attach a read-only message listener
+    // and nothing else. No presence entry is written (so we never show
+    // up in anyone's user count), no onDisconnect hook is armed (there's
+    // nothing to clean up since we never wrote anything), and no join/
+    // leave system message is posted. We also hide the message input so
+    // there's no way to accidentally send something and blow our cover.
+    isQuietWatch = true;
+    setStatus(`<span style="color:#9b72cf">------&gt;</span> <span style="color:#6a5a80">Status:</span> <span class="status-connected">Connected</span> <span style="color:#cf9b72">// watching ${code} quietly</span>`);
+    document.getElementById('chat-area').style.display = 'flex';
+    document.getElementById('chat-area').innerHTML      = '';
+    document.getElementById('input-bar').style.display  = 'none'; // no sending while quiet
+    document.getElementById('btn-leave').style.display  = 'inline-flex';
+    listenForMessages(code);
+    console.log(`[ADMIN] Joined room "${code}" QUIETLY — no presence written, read-only`);
+    return;
+  }
+
+  setStatus(`<span style="color:#9b72cf">------&gt;</span> <span style="color:#6a5a80">Status:</span> <span class="status-connected">Connected</span> <span style="color:#3e3058">// ${code}</span>`);
+
+  isQuietWatch = false;
+
+  // Flip the UI into "inside a room" mode
+  document.getElementById('dorm-input').disabled     = true;
+  document.getElementById('btn-enter').disabled      = true;
+  document.getElementById('btn-leave').style.display = 'inline-flex';
+  document.getElementById('chat-area').style.display = 'flex';
+  document.getElementById('input-bar').style.display = 'block';
+  document.getElementById('chat-area').innerHTML      = ''; // clear any previous room's messages
+
+  // Lock the name button for the duration of the session — greyed out
+  // and visually disabled so it's obvious at a glance, not just silently
+  // blocked when clicked.
+  const nameBtn = document.querySelector('.btn-name');
+  nameBtn.disabled = true;
+  nameBtn.style.opacity = '0.4';
+  nameBtn.style.cursor = 'not-allowed';
+
+  // --- 1. Register presence ---
+  // IMPORTANT CHANGE: presence is now keyed by our own Firebase UID
+  // (not a random push key). This lets the database rules enforce
+  // "you may only write to rooms/<code>/presence/<your-own-uid>" — a
+  // forged presence entry under someone else's UID is rejected by the
+  // SERVER, not just hidden by our UI.
+  myPresenceRef = fb.ref(fb.db, `rooms/${code}/presence/${myUid}`);
+  await fb.set(myPresenceRef, { name: myName, joinedAt: Date.now(), uid: myUid });
+  console.log(`[JOIN] Registered presence for "${myName}" (uid ${myUid})`);
+
+  // --- 2. Auto-cleanup on disconnect ---
+  // This tells the FIREBASE SERVER (not our browser) to delete this
+  // exact presence node the instant it detects our connection drop.
+  // This is the mechanism that makes "dorm closes when everyone
+  // leaves" reliable even if someone's browser crashes.
+  fb.onDisconnect(myPresenceRef).remove();
+  console.log('[JOIN] onDisconnect cleanup armed for this session');
+
+  // --- 3. Listen for new chat messages ---
+  listenForMessages(code);
+
+  // --- 4. Listen for presence changes (live user count + empty-room detection) ---
+  listenForPresence(code);
+
+  // --- 5. Announce arrival to everyone already in the room ---
+  await postSystemMessage(code, `${myName} has joined`, 'join');
+
+  setTimeout(() => document.getElementById('msg-input').focus(), 100);
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 8: MESSAGE LISTENER
+   onChildAdded fires once for every existing message immediately when
+   we attach (so chat history loads), and then again in real time for
+   every NEW message anyone sends afterward. This single listener type
+   replaces both "loadMessages()" and "subscribeRealtime()" from the
+   Supabase version — Firebase merges history + live updates into one
+   call, which is simpler and removes the "gap between load and
+   subscribe" bug we had before.
+   --------------------------------------------------------------------- */
+function listenForMessages(code) {
+  const messagesRef = fb.ref(fb.db, `rooms/${code}/messages`);
+
+  // onChildAdded returns an "unsubscribe" function in the v9+ SDK,
+  // which we store so leaveRoom() can detach this listener cleanly.
+  msgListenerUnsub = fb.onChildAdded(messagesRef, (snapshot) => {
+    const m = snapshot.val();
+    console.log('[MSG] received', m);
+    renderMessage(m);
+  });
+}
+
+/* Render one message bubble/line into the chat area */
+function renderMessage(m) {
+  const chat = document.getElementById('chat-area');
+
+  // remove the "no messages yet" placeholder the first time something arrives
+  const empty = chat.querySelector('.msg-system.placeholder');
+  if (empty) empty.remove();
+
+  const div = document.createElement('div');
+  div.className = 'msg-line';
+
+  if (m.type === 'join') {
+    div.innerHTML = `<span class="msg-system join">// ${esc(m.text)}</span>`;
+  } else if (m.type === 'leave') {
+    div.innerHTML = `<span class="msg-system leave">// ${esc(m.text)}</span>`;
+  } else {
+    const isMe = m.name === myName;
+    div.innerHTML = `<span class="msg-name ${isMe ? 'mine' : ''}">${esc(m.name)}:</span> <span class="msg-text">${esc(m.text)}</span>`;
+  }
+
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;   // auto-scroll to the newest message
+}
+
+/* If the room is totally fresh, onChildAdded fires zero times, so we
+   show a friendly placeholder after a short grace period. */
+function maybeShowEmptyPlaceholder() {
+  const chat = document.getElementById('chat-area');
+  if (chat.children.length === 0) {
+    chat.innerHTML = '<div class="msg-system placeholder">// no messages yet — say hello!</div>';
+  }
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 9: SEND A MESSAGE
+   push() under /rooms/<code>/messages creates a new unique-keyed node;
+   every connected client's onChildAdded listener (including our own)
+   fires for it automatically. We do NOT render it locally first — we
+   let Firebase's own echo do the rendering, which means there is only
+   ONE code path for "a message appeared," eliminating the duplicate-
+   render / fade-and-disappear bug from the Supabase version entirely.
+   --------------------------------------------------------------------- */
+async function sendMsg() {
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text || !currentRoom) return;
+
+  // Client-side cooldown mirror (purely for instant UX feedback — the
+  // actual enforcement happens server-side in the database rules, so
+  // this client check can't be bypassed to regain real spam ability,
+  // it just stops an honest user from hammering Enter pointlessly).
+  const now = Date.now();
+  if (now - lastSendAt < 600) {
+    showToast("You're sending messages too fast — slow down a little.");
+    return;
+  }
+  lastSendAt = now;
+
+  input.value = '';                      // clear the box immediately for snappy feel
+
+  const messagesRef = fb.ref(fb.db, `rooms/${currentRoom}/messages`);
+  try {
+    await fb.push(messagesRef, {
+      name: myName,
+      text: text,
+      type: 'msg',
+      ts: Date.now(),
+      senderUid: myUid   // <-- the field our new rules check against auth.uid
+    });
+    console.log(`[SEND] "${text}" sent by ${myName} (uid ${myUid}) to room "${currentRoom}"`);
+  } catch (err) {
+    console.error('[SEND] failed:', err);
+    input.value = text;                  // restore text so the user doesn't lose it
+    if (String(err).includes('PERMISSION_DENIED')) {
+      showToast('Message blocked by server — you may be sending too fast.');
+    } else {
+      showToast('Message failed to send. Check your connection.');
+    }
+  }
+}
+
+/* Helper used internally for join/leave system messages */
+async function postSystemMessage(code, text, type) {
+  const messagesRef = fb.ref(fb.db, `rooms/${code}/messages`);
+  await fb.push(messagesRef, { name: myName, text, type, ts: Date.now(), senderUid: myUid });
+  console.log(`[SYSTEM] posted "${text}" (${type}) to room "${code}"`);
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 10: PRESENCE LISTENER  →  live user count + 10-MINUTE GRACE
+   PERIOD before auto-deleting an empty room.
+
+   WHY A SIMPLE setTimeout() DOESN'T WORK HERE:
+   If the LAST person closes their browser tab entirely (not clicking
+   Leave), there is no JavaScript running anywhere to count down 10
+   minutes — the tab that would run that timer no longer exists. So
+   instead of timing this in-memory, we write the deadline AS DATA into
+   Firebase itself: a `emptyAt` timestamp on the room. Any client that's
+   still around (including the admin panel, or the next person checking
+   if the code is free) can read that timestamp and know whether 10
+   minutes have passed, regardless of which tab — if any — is open.
+
+   THE FULL FLOW:
+   1. Presence count hits 0 → write rooms/<code>/emptyAt = now.
+   2. Presence count goes back above 0 (someone rejoins in time) →
+      clear emptyAt (room is "saved" from deletion).
+   3. A lightweight periodic sweep (run by ANY currently-open tab,
+      including yours if you have the admin panel open, or any normal
+      visitor's tab since the check is cheap) looks at all rooms with
+      an emptyAt timestamp older than 10 minutes and deletes them.
+   --------------------------------------------------------------------- */
+const EMPTY_ROOM_GRACE_MS = 10 * 60 * 1000; // 10 minutes
+
+function listenForPresence(code) {
+  const presenceRef = fb.ref(fb.db, `rooms/${code}/presence`);
+
+  presenceListenerUnsub = fb.onValue(presenceRef, (snapshot) => {
+    const val = snapshot.val();                      // null if empty, else {key: {name,...}, ...}
+    const count = val ? Object.keys(val).length : 0;
+
+    console.log(`[PRESENCE] room "${code}" now has ${count} user(s)`, val);
+
+    // Only touch the UI if we're still actually looking at this room
+    // (prevents a stray late callback from writing to a screen that
+    // has already moved on to a different room or the entry screen).
+    if (currentRoom === code) {
+      document.getElementById('user-count').textContent =
+        `${count} user${count !== 1 ? 's' : ''} in dorm`;
+    }
+
+    // Direct reference to the emptyAt CHILD path specifically (not the
+    // room root). Using set() on this exact child — rather than
+    // update() on the parent — means Firebase's rule engine has zero
+    // ambiguity about which .write rule applies: it's always the
+    // emptyAt-specific rule, which any authenticated user may write to,
+    // regardless of who created the room. This is what lets the grace
+    // timer work for everyone, not just the room's original creator.
+    const emptyAtRef = fb.ref(fb.db, `rooms/${code}/emptyAt`);
+
+    if (count === 0) {
+      // Room just became empty — stamp it with "emptyAt = now" instead
+      // of deleting immediately. This is the start of the 10-minute
+      // grace window. Multiple tabs noticing this at once is harmless:
+      // they'll all write nearly the same timestamp, and the first
+      // write simply wins (last-write-wins is fine here since they're
+      // all "now" anyway, within milliseconds of each other).
+      fb.set(emptyAtRef, Date.now())
+        .then(() => console.log(`[GRACE] room "${code}" is empty — 10-minute grace period started`))
+        .catch(err => console.error('[GRACE] failed to stamp emptyAt:', err));
+    } else {
+      // Someone is here (again) — clear any pending grace timestamp so
+      // the room is no longer on the chopping block.
+      fb.remove(emptyAtRef)
+        .then(() => console.log(`[GRACE] room "${code}" has people again — grace period cancelled`))
+        .catch(err => console.error('[GRACE] failed to clear emptyAt:', err));
+    }
+  });
+
+  // Show the "no messages yet" placeholder shortly after attaching,
+  // if nothing came through onChildAdded by then.
+  setTimeout(maybeShowEmptyPlaceholder, 600);
+}
+
+/* Wipes /rooms/<code> entirely — messages, presence, and the room
+   marker all live under this one path, so a single remove() clears
+   everything. This is what makes the dorm code fully free again with
+   no previous chat history surviving. */
+function deleteWholeRoom(code) {
+  const roomRef = fb.ref(fb.db, `rooms/${code}`);
+  fb.remove(roomRef)
+    .then(() => console.log(`[CLEANUP] room "${code}" fully deleted — code is free again`))
+    .catch(err => console.error(`[CLEANUP] failed to delete room "${code}":`, err));
+}
+
+/* ---------------------------------------------------------------------
+   GRACE-PERIOD SWEEPER
+   Runs periodically in EVERY open tab (any visitor's, not just admin's
+   — this is intentional, since we can't rely on any one specific tab
+   staying open). Checks every room's `emptyAt` timestamp; if it's set
+   and older than EMPTY_ROOM_GRACE_MS, the room gets deleted.
+
+   This is deliberately cheap: one read of the whole /rooms tree every
+   60 seconds. At friend-group scale (a handful of rooms at most) this
+   is negligible load, and Firebase's free tier comfortably handles it.
+   --------------------------------------------------------------------- */
+function startGraceSweeper() {
+  // Run once shortly after boot, then every 60 seconds after that.
+  setTimeout(runGraceSweep, 5000);
+  setInterval(runGraceSweep, 60 * 1000);
+}
+
+async function runGraceSweep() {
+  if (!fb) return; // not booted yet
+  const roomsRef = fb.ref(fb.db, 'rooms');
+  const snap = await fb.get(roomsRef);
+  if (!snap.exists()) return;
+
+  const rooms = snap.val();
+  const now = Date.now();
+
+  for (const code of Object.keys(rooms)) {
+    const room = rooms[code];
+    if (room.emptyAt && (now - room.emptyAt) >= EMPTY_ROOM_GRACE_MS) {
+      console.log(`[SWEEP] room "${code}" has been empty for 10+ minutes — deleting`);
+      deleteWholeRoom(code);
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 11: LEAVE ROOM
+   Order matters here:
+     1. Post the "X has left" system message FIRST (while we're still
+        registered) so people currently in the room see it.
+     2. Detach our local listeners (stop reacting to further changes).
+     3. Remove our own presence node — this is what may trigger the
+        "room empty -> delete" logic above on the LAST person's leave.
+     4. Reset all local UI state back to the entry screen.
+   --------------------------------------------------------------------- */
+async function leaveRoom() {
+  if (!currentRoom) return;
+  const roomLeaving = currentRoom;
+
+  // QUIET WATCH EXIT PATH: since nothing was ever written (no presence,
+  // no join message), leaving is just "stop listening and reset the UI."
+  // There's nothing to clean up and no one to announce a departure to —
+  // as far as the room's real occupants are concerned, we were never
+  // there at all.
+  if (isQuietWatch) {
+    console.log(`[ADMIN] Stopped watching room "${roomLeaving}" quietly`);
+    if (msgListenerUnsub) { msgListenerUnsub(); msgListenerUnsub = null; }
+    currentRoom = null;
+    isQuietWatch = false;
+    pendingCode = null;
+
+    document.getElementById('btn-leave').style.display = 'none';
+    document.getElementById('chat-area').style.display  = 'none';
+    document.getElementById('chat-area').innerHTML        = '';
+    document.getElementById('input-bar').style.display    = 'none';
+    document.getElementById('status-line').style.display  = 'none';
+    loadWhatsNew(); // re-show landing content now that we're back on the landing screen
+    return;
+  }
+
+  console.log(`[LEAVE] "${myName}" leaving room "${roomLeaving}"`);
+
+  // 1. Tell everyone else we're leaving
+  await postSystemMessage(roomLeaving, `${myName} has left`, 'leave');
+
+  // 2. Stop listening — prevents this tab from reacting to the deletion
+  //    of a room we ourselves are causing.
+  if (msgListenerUnsub) { msgListenerUnsub(); msgListenerUnsub = null; }
+  if (presenceListenerUnsub) { presenceListenerUnsub(); presenceListenerUnsub = null; }
+
+  // 3. Remove our presence entry. If we were the last person, the
+  //    OTHER tabs' presence listeners would have caught it and deleted
+  //    the room — but since we just detached our own listener, we
+  //    explicitly check-and-delete here too, covering the "I was the
+  //    only one in the room" case.
+  currentRoom = null; // clear BEFORE the await so our own (now-detached) listener can't double-fire
+
+  if (myPresenceRef) {
+    await fb.remove(myPresenceRef);
+    myPresenceRef = null;
+  }
+
+  // Belt-and-suspenders re-check: if we were the last person AND we
+  // left via a clean, deliberate "Leave" click (this code path, not a
+  // tab crash/close), free the room INSTANTLY rather than making
+  // people wait through the 10-minute grace period. The grace period
+  // exists specifically for the "didn't leave, just closed the
+  // browser" case you asked about — someone who explicitly clicks
+  // Leave has unambiguously signaled they're done, so there's no
+  // reason to delay reclaiming the code for them.
+  //
+  // Harmless if this races with another tab's presence listener also
+  // calling deleteWholeRoom — remove() on an already-gone path is a
+  // safe no-op in Firebase either way.
+  const presenceRef = fb.ref(fb.db, `rooms/${roomLeaving}/presence`);
+  const snap = await fb.get(presenceRef);
+  if (!snap.exists()) {
+    console.log(`[LEAVE] confirmed room "${roomLeaving}" is empty after a clean Leave click — deleting instantly (no grace period)`);
+    deleteWholeRoom(roomLeaving);
+  }
+
+  // 4. Reset UI back to the entry screen
+  pendingCode = null;
+  isMaking = false;
+
+  document.getElementById('btn-leave').style.display     = 'none';
+  document.getElementById('chat-area').style.display      = 'none';
+  document.getElementById('chat-area').innerHTML           = '';
+  document.getElementById('input-bar').style.display       = 'none';
+  document.getElementById('status-line').style.display     = 'none';
+  document.getElementById('dorm-input').disabled            = false;
+  document.getElementById('dorm-input').value                = '';
+  document.getElementById('btn-enter').disabled              = false;
+  document.getElementById('btn-enter').textContent           = 'Enter';
+  document.getElementById('make-own-area').style.display     = 'none';
+
+  // Unlock the name button now that the session has ended
+  const nameBtn = document.querySelector('.btn-name');
+  nameBtn.disabled = false;
+  nameBtn.style.opacity = '1';
+  nameBtn.style.cursor = 'pointer';
+
+  loadWhatsNew(); // re-show landing content now that we're back on the landing screen
+}
+
+/* ---------------------------------------------------------------------
+   SECTION 13: ADMIN PANEL
+   Reached via a URL like: yoursite.com/?admin=iamowner — the secret URL
+   param is still the FIRST gate (matches your preference from before),
+   but now it reveals a real email/password login form rather than
+   opening the panel directly. Once you sign in once with that account,
+   your UID is PERMANENT — it will never change again on this Firebase
+   project, regardless of clearing cookies, switching browsers, or
+   anything else. That's what lets the database rules be filled in
+   exactly once, forever, instead of needing a fresh UID pasted in every
+   time anonymous auth resets.
+   --------------------------------------------------------------------- */
+const ADMIN_SECRET = 'iamowner';   // <-- change this any time to rotate the URL passcode
+let adminRoomsUnsub = null;
+
+/* Checked once Firebase is ready (see firebase-ready listener below).
+   Two distinct outcomes depending on what the module-script boot
+   sequence found:
+     - awaitingAdminLogin === true → URL secret matched, but no real
+       account is signed in yet. Show the login form.
+     - isRealAccount === true → already signed in with email/password
+       from a previous visit (Firebase persists this across reloads).
+       Skip the form and go straight into the panel.
+*/
+function checkAdminAccess() {
+  const params = new URLSearchParams(window.location.search);
+  const provided = params.get('admin');
+  if (provided !== ADMIN_SECRET) return; // not an admin URL at all — do nothing, normal visitor
+
+  if (fb.awaitingAdminLogin) {
+    console.log('[ADMIN] secret matched — showing login form');
+    document.getElementById('admin-login-overlay').classList.add('open');
+  } else if (fb.isRealAccount) {
+    console.log('[ADMIN] already signed in with permanent account — opening panel directly');
+    openAdmin();
+  }
+}
+
+/* Called when the admin submits the login form */
+async function submitAdminLogin() {
+  const email = document.getElementById('admin-login-email').value.trim();
+  const password = document.getElementById('admin-login-password').value;
+  const errEl = document.getElementById('admin-login-error');
+  errEl.style.display = 'none';
+
+  if (!email || !password) {
+    errEl.textContent = 'Enter both email and password.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  const btn = document.getElementById('admin-login-btn');
+  btn.disabled = true;
+  btn.textContent = 'Signing in...';
+
+  try {
+    const uid = await fb.adminLogin(email, password);
+    myUid = uid; // sync the app-wide myUid variable to the new real-account UID
+    console.log('[ADMIN] signed in successfully, permanent UID =', uid);
+    document.getElementById('admin-login-overlay').classList.remove('open');
+    openAdmin();
+  } catch (err) {
+    console.error('[ADMIN] login failed:', err);
+    errEl.textContent = humanizeAuthError(err.code);
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sign In';
+  }
+}
+
+/* Translates Firebase's auth error codes into plain language, instead
+   of showing something like "auth/invalid-credential" to a human. */
+function humanizeAuthError(code) {
+  const map = {
+    'auth/invalid-credential': 'Incorrect email or password.',
+    'auth/invalid-email': 'That email address looks invalid.',
+    'auth/user-not-found': 'No admin account exists with that email yet — see the setup note below the form.',
+    'auth/wrong-password': 'Incorrect password.',
+    'auth/too-many-requests': 'Too many failed attempts. Wait a moment and try again.',
+  };
+  return map[code] || 'Sign-in failed. Check the console for details.';
+}
+
+function openAdmin() {
+  document.getElementById('admin-overlay').classList.add('open');
+  listenForAllRooms();
+
+  // Pre-fill the editor with whatever is currently live
+  fb.get(fb.ref(fb.db, 'siteConfig/whatsNew')).then(snap => {
+    document.getElementById('admin-whatsnew-input').value = snap.val() || '';
+  });
+
+  // Print our current UID loudly — this is what goes into the rules'
+  // admin allow-list. Since this is now a real email/password account
+  // (not anonymous), this UID is PERMANENT — paste it into
+  // database.rules.json exactly once and you will never need to update
+  // it again, regardless of clearing cookies or switching devices.
+  console.log('%c[ADMIN] YOUR PERMANENT UID (paste into database.rules.json — never changes again):', 'color:#9b72cf;font-weight:bold', myUid);
+  document.getElementById('admin-uid-display').textContent = myUid;
+}
+
+function closeAdmin() {
+  document.getElementById('admin-overlay').classList.remove('open');
+  if (adminRoomsUnsub) { adminRoomsUnsub(); adminRoomsUnsub = null; }
+}
+
+/* Writes the new text to /siteConfig/whatsNew. Every visitor's
+   loadWhatsNew() listener (onValue) picks this up instantly — no
+   redeploy, no page refresh needed on their end. */
+async function adminSaveWhatsNew() {
+  const text = document.getElementById('admin-whatsnew-input').value.trim();
+  await fb.set(fb.ref(fb.db, 'siteConfig/whatsNew'), text);
+  console.log("[ADMIN] Saved What's New text, length =", text.length);
+
+  const savedTag = document.getElementById('admin-whatsnew-saved');
+  savedTag.style.display = 'inline-block';
+  setTimeout(() => { savedTag.style.display = 'none'; }, 2000);
+}
+
+/* Live-listens to the ENTIRE /rooms tree — fine at small scale (a
+   friend group), would need pagination at large scale. */
+function listenForAllRooms() {
+  const roomsRef = fb.ref(fb.db, 'rooms');
+  adminRoomsUnsub = fb.onValue(roomsRef, (snapshot) => {
+    const data = snapshot.val() || {};
+    renderAdminView(data);
+  });
+}
+
+function renderAdminView(data) {
+  const codes = Object.keys(data);
+  const totalRooms = codes.length;
+  let totalUsers = 0;
+  let totalMessages = 0;
+
+  const listEl = document.getElementById('admin-rooms-list');
+  listEl.innerHTML = '';
+
+  if (totalRooms === 0) {
+    listEl.innerHTML = '<div class="admin-empty">// no active dorms right now</div>';
+  }
+
+  codes.forEach(code => {
+    const room = data[code];
+    const presence = room.presence || {};
+    const messages = room.messages || {};
+    const userNames = Object.values(presence).map(p => p.name).filter(Boolean);
+    const msgCount = Object.keys(messages).length;
+
+    totalUsers += userNames.length;
+    totalMessages += msgCount;
+
+    // If this room is in its 10-minute empty grace period, show a
+    // countdown badge so it's obvious at a glance it's about to be
+    // auto-deleted by the sweeper.
+    let graceTag = '';
+    if (room.emptyAt) {
+      const elapsedMs = Date.now() - room.emptyAt;
+      const remainingMs = Math.max(0, EMPTY_ROOM_GRACE_MS - elapsedMs);
+      const remainingMin = Math.ceil(remainingMs / 60000);
+      graceTag = `<div class="admin-room-grace">⏳ Empty — auto-deletes in ~${remainingMin} min</div>`;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'admin-room-card';
+    card.innerHTML = `
+      <div class="admin-room-head">
+        <span class="admin-room-code">${esc(code)}</span>
+        <div style="display:flex; gap:8px;">
+          <button class="admin-btn-watch" onclick="adminWatchRoom('${esc(code)}')">Join Quietly</button>
+          <button class="admin-btn-delete" onclick="adminDeleteRoom('${esc(code)}')">Force Delete</button>
+        </div>
+      </div>
+      <div class="admin-room-users">👥 ${userNames.length} user(s): ${userNames.map(esc).join(', ') || '—'}</div>
+      <div class="admin-room-msgcount">💬 ${msgCount} message(s) in last 10 min window</div>
+      ${graceTag}
+    `;
+    listEl.appendChild(card);
+  });
+
+  document.getElementById('admin-stats').innerHTML = `
+    <div><b>${totalRooms}</b>active dorms</div>
+    <div><b>${totalUsers}</b>users online</div>
+    <div><b>${totalMessages}</b>live messages</div>
+  `;
+}
+
+function adminDeleteRoom(code) {
+  console.log('[ADMIN] force-deleting room', code);
+  fb.remove(fb.ref(fb.db, `rooms/${code}`));
+}
+
+/* Deletes the ENTIRE /rooms tree in one shot — every dorm, every
+   message, every presence entry, gone. Used for a clean slate (e.g.
+   right after deploying the security update, or just to reset
+   everything). Guarded with a confirm() since this can't be undone. */
+function adminWipeAllRooms() {
+  const sure = confirm('This will permanently delete ALL dorm rooms and their chat history. This cannot be undone. Continue?');
+  if (!sure) return;
+
+  console.log('[ADMIN] wiping entire /rooms tree');
+  fb.remove(fb.ref(fb.db, 'rooms'))
+    .then(() => {
+      console.log('[ADMIN] all rooms wiped successfully');
+      showToast('All dorm rooms cleared.', '#4ecf8a');
+    })
+    .catch(err => {
+      console.error('[ADMIN] wipe failed:', err);
+      showToast('Wipe failed — check console.');
+    });
+}
+
+/* Closes the admin overlay and silently attaches to a room's chat feed
+   so you (and only you) can read live messages without appearing in
+   the user list, without triggering a join announcement, and without
+   any way to accidentally send a message and reveal yourself. */
+function adminWatchRoom(code) {
+  console.log(`[ADMIN] Joining room "${code}" quietly`);
+  closeAdmin();
+  joinRoom(code, true); // true = silent mode
+}
+
+// Hook the admin check into the same boot sequence as everything else
+window.addEventListener('firebase-ready', () => {
+  checkAdminAccess();
+});
+
+/* ---------------------------------------------------------------------
+   SECTION 14: EXPOSE FUNCTIONS GLOBALLY
+   Because this <script> tag is a plain classic script (not type=module),
+   functions declared with `function name(){}` at top level are already
+   attached to `window` automatically in browsers — so onclick="..." in
+   the HTML above can find them. No extra wiring needed. This comment
+   just documents that fact for clarity.
+   --------------------------------------------------------------------- */
+</script>
+</body>
+</html>
