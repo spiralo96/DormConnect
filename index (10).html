@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DormConnect</title>
+
+<script type="module">
+  import { initializeApp }    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getDatabase, ref, push, set, get, onValue, onChildAdded,
+    onDisconnect, remove, update
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+  import {
+    getAuth, signInAnonymously, onAuthStateChanged, signInWithEmailAndPassword
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+  const firebaseConfig = {
+    apiKey:            "AIzaSyDUJ6co-jNOuvwzCeVvqKVYQUFI5KiOLbM",
+    authDomain:        "dorm-connect-a7a8b.firebaseapp.com",
+    databaseURL:       "https://dorm-connect-a7a8b-default-rtdb.firebaseio.com",
+    projectId:         "dorm-connect-a7a8b",
+    storageBucket:     "dorm-connect-a7a8b.firebasestorage.app",
+    messagingSenderId: "38318206068",
+    appId:             "1:38318206068:web:97eb7d8a9846d04a097521"
+  };
+
+  const app  = initializeApp(firebaseConfig);
+  const db   = getDatabase(app);
+  const auth = getAuth(app);
+
+  // Check URL before deciding auth path so we never race into anonymous
+  const isAdminURL = new URLSearchParams(window.location.search).get('admin') === 'iamowner';
+
+  window.__fb = { db, ref, push, set, get, onValue, onChildAdded, onDisconnect, remove, update };
+
+  // Expose admin login so the plain script can call it from the form
+  window.__fb.adminLogin = async (email, pw) => {
+    const cred = await signInWithEmailAndPassword(auth, email, pw);
+    window.__fb.uid = cred.user.uid;
+    window.__fb.isReal = true;
+    return cred.user.uid;
+  };
+
+  onAuthStateChanged(auth, user => {
+    if (user) {
+      // Signed in — either anonymous (normal visitor) or real (admin who
+      // logged in previously and whose session persisted in localStorage)
+      window.__fb.uid    = user.uid;
+      window.__fb.isReal = !user.isAnonymous;
+      window.__fb.ready  = true;
+      window.dispatchEvent(new Event('fb-ready'));
+    } else if (isAdminURL) {
+      // Admin URL but nobody signed in yet — fire ready with a flag so the
+      // plain script knows to show the login form instead of trying to use
+      // a null UID for Firebase operations
+      window.__fb.needsAdminLogin = true;
+      window.__fb.ready = true;
+      window.dispatchEvent(new Event('fb-ready'));
+    } else {
+      // Normal visitor, not signed in → sign in anonymously (silent, invisible)
+      signInAnonymously(auth).catch(e => console.error('[AUTH] anon failed', e));
+    }
+  });
+</script>
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #1a1625; color: #c9b8d4;
+  font-family: 'Courier New', monospace;
+  min-height: 100vh; display: flex; flex-direction: column;
+}
+
+/* ── TOP BAR ── */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px; height: 52px; background: #12101c;
+  border-bottom: 1px solid #2e2540; flex-shrink: 0;
+}
+.logo { color: #9b72cf; font-size: 18px; font-weight: bold; letter-spacing: 1px; }
+.logo span { color: #c9b8d4; }
+.hello-text { color: #9b72cf; font-size: 14px; }
+.hello-text span { color: #c9b8d4; }
+.topbar-right { display: flex; gap: 10px; align-items: center; }
+.btn-name {
+  background: #2a2138; border: 1px solid #3e3058; color: #c9b8d4;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 13px;
+  display: flex; align-items: center; gap: 6px; transition: background 0.15s;
+}
+.btn-name:hover { background: #352a4a; }
+.btn-leave {
+  background: #6b3fa0; border: none; color: #f0e6ff;
+  padding: 6px 16px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 13px;
+  transition: background 0.15s; display: none;
+}
+.btn-leave:hover { background: #7d4db8; }
+
+/* ── MAIN ── */
+.main {
+  flex: 1; display: flex; flex-direction: column;
+  padding: 20px 24px; overflow: hidden; min-height: 0;
+}
+.dorm-line {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 14px; flex-shrink: 0; flex-wrap: wrap;
+}
+.dorm-input {
+  background: #2a2138; border: 1px solid #3e3058; color: #e0d0f0;
+  padding: 5px 12px; border-radius: 8px;
+  font-family: 'Courier New', monospace; font-size: 14px;
+  width: 180px; outline: none; transition: border-color 0.15s;
+}
+.dorm-input:focus { border-color: #9b72cf; }
+.dorm-input::placeholder { color: #4a3a60; }
+.dorm-input:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-enter {
+  background: #2a2138; border: 1px solid #3e3058; color: #c9b8d4;
+  padding: 5px 16px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 14px;
+  transition: background 0.15s; min-width: 64px;
+}
+.btn-enter:hover { background: #352a4a; }
+.btn-enter:disabled { opacity: 0.4; cursor: not-allowed; }
+.status-line {
+  margin-top: 10px; font-size: 14px; color: #6a5a80;
+  min-height: 22px; display: none; align-items: center; gap: 6px;
+}
+.status-connected { color: #4ecf8a; }
+.status-notexist  { color: #cf4e7e; }
+.make-own-area { display: none; margin-top: 8px; }
+.make-own-text { font-size: 13px; color: #cf6ead; }
+.btn-makeown {
+  margin-top: 8px; background: #6b3fa0; border: none; color: #f0e6ff;
+  padding: 8px 18px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 13px;
+  display: block; transition: background 0.15s;
+}
+.btn-makeown:hover { background: #7d4db8; }
+
+/* ── WHAT'S NEW ── */
+.whats-new {
+  margin-top: 28px; padding-top: 16px;
+  border-top: 1px solid #2e2540; max-width: 520px; display: none;
+}
+.whats-new-title { color: #9b72cf; font-size: 13px; margin-bottom: 8px; }
+.whats-new-body  { color: #8a7a9a; font-size: 13px; line-height: 1.8; white-space: pre-wrap; }
+.whats-new-body:empty::before { content: 'Nothing new right now.'; color: #4a3a60; font-style: italic; }
+
+/* ── CHAT ── */
+.chat-area {
+  flex: 1; overflow-y: auto; margin-top: 14px; padding-right: 4px;
+  display: none; flex-direction: column; gap: 2px; min-height: 0;
+}
+.chat-area::-webkit-scrollbar { width: 4px; }
+.chat-area::-webkit-scrollbar-thumb { background: #3e3058; border-radius: 4px; }
+.msg-line { font-size: 14px; line-height: 1.7; word-break: break-word; }
+.msg-name { color: #9b72cf; font-weight: bold; }
+.msg-name.mine { color: #cf9b72; }
+.msg-text { color: #d0c4e0; }
+.msg-system { color: #4a3860; font-style: italic; font-size: 13px; }
+.msg-system.join  { color: #4ecf8a; }
+.msg-system.leave { color: #cf6e6e; }
+
+/* ── INPUT BAR ── */
+.input-bar {
+  flex-shrink: 0; margin-top: 12px;
+  border-top: 1px solid #2e2540; padding-top: 12px; display: none;
+}
+.input-row { display: flex; align-items: center; gap: 8px; }
+.input-prompt { color: #9b72cf; font-size: 14px; white-space: nowrap; }
+.msg-input {
+  flex: 1; background: transparent; border: none; color: #e0d0f0;
+  font-family: 'Courier New', monospace; font-size: 14px;
+  outline: none; caret-color: #9b72cf;
+}
+.msg-input::placeholder { color: #3a2a50; }
+.user-count { color: #3e3058; font-size: 12px; margin-top: 6px; }
+
+/* ── MODALS ── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(10,8,18,0.8);
+  display: none; align-items: center; justify-content: center; z-index: 100;
+}
+.modal-overlay.open { display: flex; }
+.modal-box {
+  background: #1e1830; border: 1px solid #3e3058;
+  border-radius: 10px; padding: 28px 28px 24px;
+  width: 340px; max-width: 90vw; position: relative;
+}
+.modal-title { color: #e0d0f0; font-size: 17px; margin-bottom: 6px; }
+.modal-sub   { color: #6a5a80; font-size: 13px; margin-bottom: 18px; }
+.modal-close {
+  position: absolute; top: 14px; right: 16px;
+  background: none; border: none; color: #4a3a60;
+  font-size: 18px; cursor: pointer;
+}
+.modal-close:hover { color: #9b72cf; }
+.modal-input {
+  width: 100%; background: #2a2138; border: 1px solid #3e3058; color: #e0d0f0;
+  padding: 8px 14px; border-radius: 8px; font-family: 'Courier New', monospace;
+  font-size: 14px; outline: none; margin-bottom: 14px; transition: border-color 0.15s;
+}
+.modal-input:focus { border-color: #9b72cf; }
+.btn-save {
+  width: 100%; background: #6b3fa0; border: none; color: #f0e6ff;
+  padding: 10px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 14px; font-weight: bold;
+}
+.btn-save:hover { background: #7d4db8; }
+.btn-secondary {
+  width: 100%; background: #2a2138; border: 1px solid #3e3058; color: #c9b8d4;
+  padding: 9px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 13px; margin-top: 10px;
+}
+.btn-secondary:hover { background: #352a4a; }
+.modal-error {
+  color: #cf4e7e; font-size: 12px; margin-top: 10px;
+  background: #2a1822; border: 1px solid #4a2535;
+  border-radius: 6px; padding: 8px 12px; display: none;
+}
+.modal-hint {
+  color: #4a3a60; font-size: 11px; margin-top: 14px; line-height: 1.6;
+  border-top: 1px solid #2e2540; padding-top: 12px;
+}
+
+/* ── TOAST ── */
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: #2a2138; border: 1px solid #cf4e7e; color: #cf6ead;
+  padding: 10px 20px; border-radius: 8px; font-size: 13px;
+  z-index: 9999; display: none; white-space: nowrap; pointer-events: none;
+}
+
+/* ── SPINNER ── */
+.spinner {
+  display: inline-block; width: 10px; height: 10px;
+  border: 2px solid #3e3058; border-top-color: #9b72cf;
+  border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 4px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── ADMIN PANEL ── */
+.admin-overlay {
+  position: fixed; inset: 0; background: #14101d; z-index: 500;
+  display: none; flex-direction: column; overflow: hidden;
+}
+.admin-overlay.open { display: flex; }
+.admin-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px; height: 52px; background: #0e0c16;
+  border-bottom: 1px solid #3e3058; flex-shrink: 0;
+}
+.admin-title { color: #cf9b72; font-size: 16px; font-weight: bold; }
+.admin-title span { color: #6a5a80; font-size: 12px; margin-left: 8px; }
+.admin-close {
+  background: #2a2138; border: 1px solid #3e3058; color: #c9b8d4;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 13px;
+}
+.admin-close:hover { background: #352a4a; }
+.admin-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
+.admin-section { margin-bottom: 28px; }
+.admin-section-title { color: #cf9b72; font-size: 13px; margin-bottom: 12px; font-weight: bold; }
+.admin-uid-box {
+  background: #1e1830; border: 1px solid #3e3058; border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 20px; font-size: 12px; color: #6a5a80;
+}
+.admin-uid-box code {
+  color: #4ecf8a; background: #12101c; padding: 2px 8px;
+  border-radius: 4px; font-size: 12px; user-select: all; cursor: text;
+}
+.admin-uid-hint { color: #4a3a60; font-size: 11px; display: block; margin-top: 4px; }
+.admin-stats {
+  display: flex; gap: 24px; margin-bottom: 20px; color: #6a5a80; font-size: 13px;
+}
+.admin-stats b { color: #c9b8d4; font-size: 18px; display: block; }
+.admin-whatsnew-input {
+  width: 100%; max-width: 520px; min-height: 90px;
+  background: #1e1830; border: 1px solid #3e3058; color: #e0d0f0;
+  padding: 10px 14px; border-radius: 8px;
+  font-family: 'Courier New', monospace; font-size: 13px;
+  outline: none; resize: vertical; margin-bottom: 10px; display: block;
+}
+.admin-whatsnew-input:focus { border-color: #9b72cf; }
+.btn-admin-save {
+  background: #6b3fa0; border: none; color: #f0e6ff;
+  padding: 7px 18px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 13px;
+}
+.btn-admin-save:hover { background: #7d4db8; }
+.admin-saved { display: none; color: #4ecf8a; font-size: 12px; margin-left: 12px; }
+.btn-wipeall {
+  background: #2a2138; border: 1px solid #cf4e7e; color: #cf6ead;
+  padding: 7px 16px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 12px; margin-bottom: 14px;
+}
+.btn-wipeall:hover { background: #cf4e7e; color: #fff; }
+.admin-room-card {
+  background: #1e1830; border: 1px solid #3e3058; border-radius: 8px;
+  padding: 14px 18px; margin-bottom: 12px;
+}
+.admin-room-head {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+}
+.admin-room-code { color: #9b72cf; font-size: 15px; font-weight: bold; }
+.admin-room-users   { color: #4ecf8a; font-size: 13px; margin-bottom: 4px; }
+.admin-room-msgs    { color: #cf9b72; font-size: 13px; }
+.admin-room-grace   { color: #cf6e6e; font-size: 12px; margin-top: 6px; font-style: italic; }
+.btn-watch {
+  background: #2a2138; border: 1px solid #3e3058; color: #4ecf8a;
+  padding: 5px 12px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 12px;
+}
+.btn-watch:hover { background: #352a4a; }
+.btn-delete {
+  background: #6b3fa0; border: none; color: #f0e6ff;
+  padding: 5px 12px; border-radius: 6px; cursor: pointer;
+  font-family: 'Courier New', monospace; font-size: 12px;
+}
+.btn-delete:hover { background: #cf4e7e; }
+.admin-empty { color: #4a3a60; font-size: 14px; font-style: italic; }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="logo">&gt;_ <span>DormConnect</span></div>
+  <div class="hello-text">Hello! <span id="hello-name"></span></div>
+  <div class="topbar-right">
+    <button class="btn-name" onclick="openNameModal()">
+      <span style="color:#9b72cf;font-size:12px">✎</span>
+      <span id="topbar-name"></span>
+    </button>
+    <button class="btn-leave" id="btn-leave" onclick="leaveRoom()">&#x2192; Leave</button>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+  <div class="dorm-line">
+    <span style="color:#9b72cf">&gt;_</span>
+    <span style="color:#6a5a80">Enter Dorm code:</span>
+    <input class="dorm-input" id="dorm-input" placeholder="e.g., room123" maxlength="24"
+      onkeydown="if(event.key==='Enter')enterDorm()">
+    <button class="btn-enter" id="btn-enter" onclick="enterDorm()">Enter</button>
+  </div>
+  <div class="status-line" id="status-line"></div>
+  <div class="make-own-area" id="make-own-area">
+    <div class="make-own-text">Enter valid dorm code</div>
+    <button class="btn-makeown" id="btn-makeown" onclick="makeOwn()">Make it your own</button>
+  </div>
+  <div class="whats-new" id="whats-new">
+    <div class="whats-new-title">// What's new</div>
+    <div class="whats-new-body" id="whats-new-body"></div>
+  </div>
+  <div class="chat-area" id="chat-area"></div>
+  <div class="input-bar" id="input-bar">
+    <div class="input-row">
+      <span class="input-prompt">&gt;_</span>
+      <input class="msg-input" id="msg-input" placeholder="Type your message..."
+        maxlength="500" onkeydown="if(event.key==='Enter')sendMsg()">
+    </div>
+    <div class="user-count" id="user-count"></div>
+  </div>
+</div>
+
+<!-- CHANGE NAME MODAL -->
+<div class="modal-overlay" id="name-modal">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeNameModal()">✕</button>
+    <div class="modal-title">Change Your Name</div>
+    <div class="modal-sub">Letters and numbers only. Name locks once you join a room.</div>
+    <input class="modal-input" id="name-input" placeholder="Enter new name"
+      maxlength="20" onkeydown="if(event.key==='Enter')saveName()">
+    <button class="btn-save" onclick="saveName()">Save</button>
+  </div>
+</div>
+
+<!-- FORCED RENAME MODAL (name collision on join — no close button) -->
+<div class="modal-overlay" id="rename-modal">
+  <div class="modal-box">
+    <div class="modal-title">Name Already Taken</div>
+    <div class="modal-sub" id="rename-modal-text"></div>
+    <input class="modal-input" id="rename-input" placeholder="Enter a different name"
+      maxlength="20" onkeydown="if(event.key==='Enter')confirmRename()">
+    <button class="btn-save" onclick="confirmRename()">Confirm</button>
+    <button class="btn-secondary" onclick="randomizeRename()">🎲 Randomize Instead</button>
+  </div>
+</div>
+
+<!-- ADMIN LOGIN MODAL -->
+<div class="modal-overlay" id="admin-login-modal">
+  <div class="modal-box">
+    <div class="modal-title">Admin Sign-In</div>
+    <div class="modal-sub">Permanent identity — sign in once, remembered forever.</div>
+    <input class="modal-input" id="admin-email" type="email" placeholder="Email"
+      autocomplete="username"
+      onkeydown="if(event.key==='Enter')document.getElementById('admin-pw').focus()">
+    <input class="modal-input" id="admin-pw" type="password" placeholder="Password"
+      autocomplete="current-password"
+      onkeydown="if(event.key==='Enter')submitAdminLogin()">
+    <button class="btn-save" id="admin-login-btn" onclick="submitAdminLogin()">Sign In</button>
+    <div class="modal-error" id="admin-login-error"></div>
+    <div class="modal-hint">
+      First time? Firebase Console → Authentication → Users → Add user,
+      then come back here and sign in with those credentials.
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- ADMIN PANEL -->
+<div class="admin-overlay" id="admin-overlay">
+  <div class="admin-topbar">
+    <div class="admin-title">&gt;_ DormConnect <span>// admin</span></div>
+    <button class="admin-close" onclick="closeAdmin()">Close</button>
+  </div>
+  <div class="admin-body">
+
+    <div class="admin-uid-box">
+      Your permanent admin UID: <code id="admin-uid-display">—</code>
+      <span class="admin-uid-hint">Paste this into database.rules.json once — it never changes.</span>
+    </div>
+
+    <div class="admin-stats" id="admin-stats">
+      <div><b id="stat-rooms">0</b>active dorms</div>
+      <div><b id="stat-users">0</b>users online</div>
+      <div><b id="stat-msgs">0</b>messages</div>
+    </div>
+
+    <div class="admin-section">
+      <div class="admin-section-title">// What's New (landing screen)</div>
+      <textarea class="admin-whatsnew-input" id="admin-wn-input"
+        placeholder="Write what's new for your users..."></textarea>
+      <button class="btn-admin-save" onclick="adminSaveWhatsNew()">Save</button>
+      <span class="admin-saved" id="admin-saved">Saved ✓</span>
+    </div>
+
+    <div class="admin-section">
+      <div class="admin-section-title">// Active Dorms</div>
+      <button class="btn-wipeall" onclick="adminWipeAll()">⚠ Wipe All Rooms</button>
+      <div id="admin-rooms-list"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+/* =============================================================
+   DORMCONNECT — clean rewrite, all bugs fixed
+   ============================================================= */
+
+// ── CONSTANTS ──────────────────────────────────────────────────
+const GRACE_MS     = 10 * 60 * 1000; // 10 min grace before empty room deletion
+const COOLDOWN_MS  = 600;             // min ms between messages (client-side hint)
+const ADMIN_SECRET = 'iamowner';
+const ADJS  = ['Mauve','Crimson','Azure','Amber','Violet','Teal','Coral','Slate','Jade','Indigo','Silver','Golden','Rusty','Mossy','Dusty'];
+const NOUNS = ['Fox','Owl','Bear','Wolf','Hawk','Deer','Lynx','Crow','Mole','Vole','Panda','Otter','Raven','Drake','Fawn'];
+
+// ── STATE ──────────────────────────────────────────────────────
+let fb               = null;   // Firebase helpers (set on fb-ready)
+let myUid            = null;   // Firebase auth UID
+let myName           = '';     // display name (cosmetic only)
+let currentRoom      = null;   // room code we're in, or null
+let pendingCode      = null;   // code entered but not yet confirmed
+let isMaking         = false;  // guard against double-create
+let msgUnsub         = null;   // unsubscribe fn for message listener
+let presenceUnsub    = null;   // unsubscribe fn for presence listener
+let myPresenceRef    = null;   // ref to our own presence node
+let isQuiet          = false;  // admin "join quietly" mode
+let lastSendAt       = 0;      // for client-side cooldown display
+let renameTargetCode = null;   // room code stored during forced rename flow
+let adminRoomsUnsub  = null;   // unsubscribe fn for admin rooms listener
+
+// ── BOOT ───────────────────────────────────────────────────────
+// fb-ready fires once. We bind ONE listener here, do all setup,
+// then call checkAdminAccess() at the end.
+window.addEventListener('fb-ready', () => {
+  fb    = window.__fb;
+  myUid = fb.uid || null;
+  myName = randomName();
+  updateNameUI();
+  loadWhatsNew();
+  startGraceSweeper();
+  checkAdminAccess(); // MUST be last — needs fb to be set
+  console.log('[BOOT] ready. uid =', myUid, '| name =', myName, '| needsAdminLogin =', !!fb.needsAdminLogin);
+});
+
+// ── NAME HELPERS ───────────────────────────────────────────────
+function randomName() {
+  return ADJS[Math.floor(Math.random()*ADJS.length)] + NOUNS[Math.floor(Math.random()*NOUNS.length)];
+}
+
+function updateNameUI() {
+  document.getElementById('hello-name').textContent  = myName;
+  document.getElementById('topbar-name').textContent = myName;
+}
+
+// Validates a proposed display name. Returns {ok, clean, reason}.
+function validateName(raw) {
+  const t = (raw || '').trim();
+  if (!t) return { ok: false, reason: 'Name cannot be empty.' };
+  // Alphanumeric only
+  const clean = t.replace(/[^a-zA-Z0-9]/g, '');
+  if (clean !== t) return { ok: false, reason: 'Letters and numbers only — no spaces or symbols.' };
+  if (!clean) return { ok: false, reason: 'Name cannot be empty.' };
+  // "founder" banned (any casing)
+  if (clean.toLowerCase() === 'founder') return { ok: false, reason: 'That name is reserved.' };
+  return { ok: true, clean: clean.slice(0, 20) };
+}
+
+function openNameModal() {
+  if (currentRoom) { showToast("Can't change name while in a room."); return; }
+  document.getElementById('name-input').value = myName;
+  document.getElementById('name-modal').classList.add('open');
+  setTimeout(() => document.getElementById('name-input').focus(), 50);
+}
+function closeNameModal() { document.getElementById('name-modal').classList.remove('open'); }
+
+function saveName() {
+  if (currentRoom) { closeNameModal(); return; }
+  const r = validateName(document.getElementById('name-input').value);
+  if (!r.ok) { showToast(r.reason); return; }
+  myName = r.clean;
+  updateNameUI();
+  closeNameModal();
+}
+
+// ── TOAST ──────────────────────────────────────────────────────
+let toastTimer = null;
+function showToast(msg, color = '#cf4e7e') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = color;
+  t.style.color = color;
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
+
+// ── MISC UI ────────────────────────────────────────────────────
+function setLoading(on) {
+  document.getElementById('btn-enter').disabled  = on;
+  document.getElementById('dorm-input').disabled = on;
+  document.getElementById('btn-enter').innerHTML = on ? '<span class="spinner"></span>' : 'Enter';
+}
+function setStatus(html) {
+  const el = document.getElementById('status-line');
+  el.style.display = 'flex';
+  el.innerHTML = html;
+}
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── WHAT'S NEW ─────────────────────────────────────────────────
+function loadWhatsNew() {
+  const wnRef = fb.ref(fb.db, 'siteConfig/whatsNew');
+  fb.onValue(wnRef, snap => {
+    const text = snap.val() || '';
+    document.getElementById('whats-new-body').textContent = text;
+    document.getElementById('whats-new').style.display =
+      (!currentRoom && text.trim()) ? 'block' : 'none';
+  });
+}
+
+// ── ENTER DORM ─────────────────────────────────────────────────
+async function enterDorm() {
+  const raw = document.getElementById('dorm-input').value.trim().toLowerCase().replace(/\s+/g,'-');
+  if (!raw) return;
+
+  // Block if not authenticated yet (only happens for anonymous users
+  // while Firebase is still booting — typically < 1 second)
+  if (!fb || !myUid) { showToast('Connecting… try again in a moment.'); return; }
+
+  pendingCode = raw;
+  setLoading(true);
+  document.getElementById('make-own-area').style.display = 'none';
+
+  const snap = await fb.get(fb.ref(fb.db, `rooms/${raw}`));
+  setLoading(false);
+
+  if (!snap.exists()) {
+    setStatus(`<span style="color:#9b72cf">------&gt;</span> <span style="color:#6a5a80">Status:</span> <span class="status-notexist">Doesn't exist</span>`);
+    document.getElementById('make-own-area').style.display = 'block';
+  } else {
+    await joinRoom(raw);
+  }
+}
+
+// ── MAKE IT YOUR OWN ───────────────────────────────────────────
+async function makeOwn() {
+  if (!pendingCode || isMaking) return;
+  isMaking = true;
+  const btn = document.getElementById('btn-makeown');
+  btn.disabled = true; btn.textContent = 'Creating…';
+
+  const roomRef = fb.ref(fb.db, `rooms/${pendingCode}`);
+  const snap = await fb.get(roomRef);
+  if (!snap.exists()) {
+    await fb.set(roomRef, { createdAt: Date.now(), createdBy: myUid });
+  }
+
+  isMaking = false; btn.disabled = false; btn.textContent = 'Make it your own';
+  document.getElementById('make-own-area').style.display = 'none';
+  await joinRoom(pendingCode);
+}
+
+// ── DUPLICATE NAME CHECK ────────────────────────────────────────
+async function nameInUse(code, name) {
+  const snap = await fb.get(fb.ref(fb.db, `rooms/${code}/presence`));
+  if (!snap.exists()) return false;
+  return Object.values(snap.val()).some(p => p.name === name);
+}
+
+function showRenameModal(code) {
+  renameTargetCode = code;
+  document.getElementById('rename-modal-text').textContent =
+    `"${myName}" is already taken in this dorm. Pick a different name to continue.`;
+  document.getElementById('rename-input').value = '';
+  document.getElementById('rename-modal').classList.add('open');
+  setTimeout(() => document.getElementById('rename-input').focus(), 50);
+}
+function closeRenameModal() {
+  document.getElementById('rename-modal').classList.remove('open');
+  renameTargetCode = null;
+}
+
+async function confirmRename() {
+  const r = validateName(document.getElementById('rename-input').value);
+  if (!r.ok) { showToast(r.reason); return; }
+  const code = renameTargetCode;
+  myName = r.clean; updateNameUI(); closeRenameModal();
+  await joinRoom(code);
+}
+
+async function randomizeRename() {
+  const code = renameTargetCode;
+  let candidate = randomName(), tries = 0;
+  while (await nameInUse(code, candidate) && tries++ < 20) candidate = randomName();
+  myName = candidate; updateNameUI(); closeRenameModal();
+  await joinRoom(code);
+}
+
+// ── JOIN ROOM ──────────────────────────────────────────────────
+async function joinRoom(code, silent = false) {
+  // Duplicate name check (skip for silent/admin-watch)
+  if (!silent) {
+    if (await nameInUse(code, myName)) { showRenameModal(code); return; }
+  }
+
+  currentRoom = code;
+  document.getElementById('whats-new').style.display = 'none';
+  document.getElementById('chat-area').style.display = 'flex';
+  document.getElementById('chat-area').innerHTML = '';
+
+  if (silent) {
+    // Admin-watch mode: read-only, no presence, no announcements
+    isQuiet = true;
+    setStatus(`<span style="color:#9b72cf">------&gt;</span> <span style="color:#6a5a80">Status:</span> <span class="status-connected">Watching</span> <span style="color:#cf9b72">// ${code} (quiet)</span>`);
+    document.getElementById('input-bar').style.display = 'none';
+    document.getElementById('btn-leave').style.display = 'inline-flex';
+    listenMessages(code);
+    return;
+  }
+
+  // Normal join
+  isQuiet = false;
+  setStatus(`<span style="color:#9b72cf">------&gt;</span> <span style="color:#6a5a80">Status:</span> <span class="status-connected">Connected</span> <span style="color:#3e3058">// ${code}</span>`);
+
+  document.getElementById('dorm-input').disabled     = true;
+  document.getElementById('btn-enter').disabled      = true;
+  document.getElementById('btn-leave').style.display = 'inline-flex';
+  document.getElementById('input-bar').style.display = 'block';
+
+  // Lock name button during session
+  const nb = document.querySelector('.btn-name');
+  nb.disabled = true; nb.style.opacity = '0.4'; nb.style.cursor = 'not-allowed';
+
+  // Register presence (keyed by UID so rules can enforce write-your-own-only)
+  myPresenceRef = fb.ref(fb.db, `rooms/${code}/presence/${myUid}`);
+  await fb.set(myPresenceRef, { name: myName, joinedAt: Date.now(), uid: myUid });
+
+  // Tell Firebase server to auto-remove presence if connection drops
+  fb.onDisconnect(myPresenceRef).remove();
+
+  listenMessages(code);
+  listenPresence(code);
+
+  await pushSystemMsg(code, `${myName} has joined`, 'join');
+  setTimeout(() => document.getElementById('msg-input').focus(), 100);
+}
+
+// ── MESSAGES ───────────────────────────────────────────────────
+function listenMessages(code) {
+  const ref = fb.ref(fb.db, `rooms/${code}/messages`);
+  msgUnsub = fb.onChildAdded(ref, snap => renderMsg(snap.val()));
+  setTimeout(() => {
+    const c = document.getElementById('chat-area');
+    if (!c.children.length)
+      c.innerHTML = '<div class="msg-system placeholder">// no messages yet — say hello!</div>';
+  }, 800);
+}
+
+function renderMsg(m) {
+  const chat = document.getElementById('chat-area');
+  const ph = chat.querySelector('.msg-system.placeholder');
+  if (ph) ph.remove();
+
+  const div = document.createElement('div');
+  div.className = 'msg-line';
+
+  if (m.type === 'join') {
+    div.innerHTML = `<span class="msg-system join">// ${esc(m.text)}</span>`;
+  } else if (m.type === 'leave') {
+    div.innerHTML = `<span class="msg-system leave">// ${esc(m.text)}</span>`;
+  } else {
+    const isMe = m.name === myName;
+    div.innerHTML = `<span class="msg-name ${isMe?'mine':''}">${esc(m.name)}:</span> <span class="msg-text">${esc(m.text)}</span>`;
+  }
+
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function sendMsg() {
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text || !currentRoom) return;
+
+  const now = Date.now();
+  if (now - lastSendAt < COOLDOWN_MS) {
+    showToast("Sending too fast — slow down a little.");
+    return;
+  }
+  lastSendAt = now;
+  input.value = '';
+
+  try {
+    await fb.push(fb.ref(fb.db, `rooms/${currentRoom}/messages`), {
+      name: myName, text, type: 'msg', ts: Date.now(), senderUid: myUid
+    });
+  } catch (e) {
+    input.value = text;
+    showToast(String(e).includes('PERMISSION_DENIED')
+      ? 'Blocked by server — may be sending too fast.'
+      : 'Failed to send. Check your connection.');
+  }
+}
+
+async function pushSystemMsg(code, text, type) {
+  await fb.push(fb.ref(fb.db, `rooms/${code}/messages`),
+    { name: myName, text, type, ts: Date.now(), senderUid: myUid });
+}
+
+// ── PRESENCE & GRACE PERIOD ────────────────────────────────────
+function listenPresence(code) {
+  presenceUnsub = fb.onValue(fb.ref(fb.db, `rooms/${code}/presence`), snap => {
+    const val = snap.val();
+    const count = val ? Object.keys(val).length : 0;
+
+    if (currentRoom === code) {
+      document.getElementById('user-count').textContent =
+        `${count} user${count !== 1 ? 's' : ''} in dorm`;
+    }
+
+    const emptyRef = fb.ref(fb.db, `rooms/${code}/emptyAt`);
+    if (count === 0) {
+      // Start 10-minute grace countdown
+      fb.set(emptyRef, Date.now())
+        .catch(e => console.error('[GRACE] stamp failed', e));
+    } else {
+      // Room has people — cancel any pending deletion
+      fb.remove(emptyRef)
+        .catch(e => console.error('[GRACE] clear failed', e));
+    }
+  });
+}
+
+function startGraceSweeper() {
+  setTimeout(runSweep, 5000);
+  setInterval(runSweep, 60_000);
+}
+
+async function runSweep() {
+  if (!fb) return;
+  const snap = await fb.get(fb.ref(fb.db, 'rooms'));
+  if (!snap.exists()) return;
+  const now = Date.now();
+  snap.forEach(child => {
+    const r = child.val();
+    if (r.emptyAt && now - r.emptyAt >= GRACE_MS) {
+      console.log(`[SWEEP] deleting empty room "${child.key}"`);
+      deleteRoom(child.key);
+    }
+  });
+}
+
+function deleteRoom(code) {
+  fb.remove(fb.ref(fb.db, `rooms/${code}`))
+    .then(() => console.log(`[DELETE] room "${code}" gone`))
+    .catch(e => console.error(`[DELETE] failed:`, e));
+}
+
+// ── LEAVE ROOM ─────────────────────────────────────────────────
+async function leaveRoom() {
+  if (!currentRoom) return;
+  const leaving = currentRoom;
+
+  if (isQuiet) {
+    // Admin-watch exit: nothing was written, just detach and reset
+    if (msgUnsub) { msgUnsub(); msgUnsub = null; }
+    currentRoom = null; isQuiet = false; pendingCode = null;
+    resetToLanding();
+    return;
+  }
+
+  // Normal leave
+  await pushSystemMsg(leaving, `${myName} has left`, 'leave');
+
+  if (msgUnsub)      { msgUnsub(); msgUnsub = null; }
+  if (presenceUnsub) { presenceUnsub(); presenceUnsub = null; }
+
+  currentRoom = null; // clear before await so no double-fire
+
+  if (myPresenceRef) { await fb.remove(myPresenceRef); myPresenceRef = null; }
+
+  // If we were the last person, free the room immediately (clean Leave
+  // doesn't need the 10-min grace period — intent is clear)
+  const snap = await fb.get(fb.ref(fb.db, `rooms/${leaving}/presence`));
+  if (!snap.exists()) deleteRoom(leaving);
+
+  resetToLanding();
+}
+
+function resetToLanding() {
+  pendingCode = null; isMaking = false;
+
+  document.getElementById('btn-leave').style.display  = 'none';
+  document.getElementById('chat-area').style.display   = 'none';
+  document.getElementById('chat-area').innerHTML        = '';
+  document.getElementById('input-bar').style.display    = 'none';
+  document.getElementById('status-line').style.display  = 'none';
+  document.getElementById('dorm-input').disabled         = false;
+  document.getElementById('dorm-input').value             = '';
+  document.getElementById('btn-enter').disabled           = false;
+  document.getElementById('btn-enter').textContent        = 'Enter';
+  document.getElementById('make-own-area').style.display  = 'none';
+
+  const nb = document.querySelector('.btn-name');
+  nb.disabled = false; nb.style.opacity = '1'; nb.style.cursor = 'pointer';
+
+  loadWhatsNew(); // re-show whats-new on landing
+}
+
+// ── ADMIN PANEL ────────────────────────────────────────────────
+function checkAdminAccess() {
+  const param = new URLSearchParams(window.location.search).get('admin');
+  if (param !== ADMIN_SECRET) return;
+
+  if (fb.needsAdminLogin) {
+    // Nobody signed in yet — show the login form
+    console.log('[ADMIN] showing login form');
+    document.getElementById('admin-login-modal').classList.add('open');
+  } else if (fb.isReal) {
+    // Already signed in with a real account from a previous visit
+    console.log('[ADMIN] already authenticated — opening panel');
+    openAdmin();
+  } else {
+    // Signed in anonymously — shouldn't happen since we block anon for
+    // admin URLs, but handle gracefully
+    console.warn('[ADMIN] anonymous session on admin URL — showing login');
+    document.getElementById('admin-login-modal').classList.add('open');
+  }
+}
+
+async function submitAdminLogin() {
+  const email  = document.getElementById('admin-email').value.trim();
+  const pw     = document.getElementById('admin-pw').value;
+  const errEl  = document.getElementById('admin-login-error');
+  errEl.style.display = 'none';
+
+  if (!email || !pw) {
+    errEl.textContent = 'Enter both email and password.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  const btn = document.getElementById('admin-login-btn');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+
+  try {
+    const uid = await fb.adminLogin(email, pw);
+    myUid = uid; // sync to app-level variable
+    document.getElementById('admin-login-modal').classList.remove('open');
+    openAdmin();
+  } catch (e) {
+    const msgs = {
+      'auth/invalid-credential': 'Incorrect email or password.',
+      'auth/invalid-email':      'Invalid email address.',
+      'auth/wrong-password':     'Incorrect password.',
+      'auth/too-many-requests':  'Too many attempts — wait and try again.',
+    };
+    errEl.textContent = msgs[e.code] || 'Sign-in failed. Check console for details.';
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Sign In';
+  }
+}
+
+function openAdmin() {
+  document.getElementById('admin-overlay').classList.add('open');
+
+  // Show the permanent UID prominently
+  document.getElementById('admin-uid-display').textContent = myUid || '(not signed in as real account)';
+  console.log('%c[ADMIN UID — paste into database.rules.json]', 'color:#9b72cf;font-weight:bold', myUid);
+
+  // Pre-fill What's New editor
+  fb.get(fb.ref(fb.db, 'siteConfig/whatsNew')).then(snap => {
+    document.getElementById('admin-wn-input').value = snap.val() || '';
+  });
+
+  // Start live room listener
+  const roomsRef = fb.ref(fb.db, 'rooms');
+  adminRoomsUnsub = fb.onValue(roomsRef, snap => {
+    renderAdminRooms(snap.val() || {});
+  });
+}
+
+function closeAdmin() {
+  document.getElementById('admin-overlay').classList.remove('open');
+  if (adminRoomsUnsub) { adminRoomsUnsub(); adminRoomsUnsub = null; }
+}
+
+function renderAdminRooms(data) {
+  const codes = Object.keys(data);
+  let totalUsers = 0, totalMsgs = 0;
+
+  const list = document.getElementById('admin-rooms-list');
+  list.innerHTML = '';
+
+  if (!codes.length) {
+    list.innerHTML = '<div class="admin-empty">// no active dorms right now</div>';
+    document.getElementById('stat-rooms').textContent = 0;
+    document.getElementById('stat-users').textContent = 0;
+    document.getElementById('stat-msgs').textContent  = 0;
+    return;
+  }
+
+  codes.forEach(code => {
+    const room     = data[code];
+    const presence = room.presence || {};
+    const messages = room.messages || {};
+    const names    = Object.values(presence).map(p => p.name).filter(Boolean);
+    const msgCount = Object.keys(messages).length;
+
+    totalUsers += names.length;
+    totalMsgs  += msgCount;
+
+    let graceTag = '';
+    if (room.emptyAt) {
+      const rem = Math.max(0, Math.ceil((GRACE_MS - (Date.now() - room.emptyAt)) / 60000));
+      graceTag = `<div class="admin-room-grace">⏳ Empty — auto-deletes in ~${rem} min</div>`;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'admin-room-card';
+    card.innerHTML = `
+      <div class="admin-room-head">
+        <span class="admin-room-code">${esc(code)}</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn-watch"  onclick="adminWatch('${esc(code)}')">Join Quietly</button>
+          <button class="btn-delete" onclick="adminDelete('${esc(code)}')">Force Delete</button>
+        </div>
+      </div>
+      <div class="admin-room-users">👥 ${names.length} user(s): ${names.map(esc).join(', ') || '—'}</div>
+      <div class="admin-room-msgs">💬 ${msgCount} message(s)</div>
+      ${graceTag}
+    `;
+    list.appendChild(card);
+  });
+
+  document.getElementById('stat-rooms').textContent = codes.length;
+  document.getElementById('stat-users').textContent = totalUsers;
+  document.getElementById('stat-msgs').textContent  = totalMsgs;
+}
+
+async function adminSaveWhatsNew() {
+  const text = document.getElementById('admin-wn-input').value.trim();
+  await fb.set(fb.ref(fb.db, 'siteConfig/whatsNew'), text);
+  const s = document.getElementById('admin-saved');
+  s.style.display = 'inline';
+  setTimeout(() => { s.style.display = 'none'; }, 2000);
+}
+
+function adminDelete(code) {
+  if (!confirm(`Force-delete dorm "${code}"? This cannot be undone.`)) return;
+  fb.remove(fb.ref(fb.db, `rooms/${code}`))
+    .catch(e => showToast('Delete failed — check console'));
+}
+
+function adminWipeAll() {
+  if (!confirm('Wipe ALL dorm rooms and all chat history permanently?')) return;
+  fb.remove(fb.ref(fb.db, 'rooms'))
+    .then(() => showToast('All rooms cleared.', '#4ecf8a'))
+    .catch(e => showToast('Wipe failed — check console'));
+}
+
+function adminWatch(code) {
+  closeAdmin();
+  joinRoom(code, true);
+}
+</script>
+</body>
+</html>
